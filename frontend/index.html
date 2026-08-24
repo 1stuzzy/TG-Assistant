@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TG Manager — управление аккаунтами Telegram</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/styles.css">
+
+</head>
+<body>
+
+<!-- ================= SIDEBAR ================= -->
+<aside class="sidebar">
+  <div class="brand">
+    <div class="brand-mark">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M21.5 4.5L2.7 11.9c-1.2.5-1.2 1.2-.2 1.5l4.8 1.5 1.8 5.6c.2.6.4.9.9.9.5 0 .7-.2 1-.5l2.4-2.3 5 3.7c.9.5 1.6.2 1.8-.8L23.9 5.7c.3-1.3-.5-1.9-1.4-1.5z" fill="white" fill-opacity=".95"/></svg>
+    </div>
+    <div>
+      <div class="brand-name">TG-Assistant</div>
+      <div class="brand-sub">administration console</div>
+    </div>
+  </div>
+
+  <nav class="nav">
+    <div class="nav-item active" data-tab="accounts">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      Аккаунты
+    </div>
+    <div class="nav-item" data-tab="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+      Настройки
+    </div>
+    <div class="nav-item admin-only" data-tab="tenants">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+      Подписки
+    </div>
+    <div class="nav-item admin-only" id="consoleBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+      Консоль
+    </div>
+  </nav>
+  <div class="sidebar-footer">
+    <div class="user-chip">
+      <span id="userLogin">—</span>
+      <button class="btn btn-ghost btn-sm" id="logoutBtn" type="button">Выйти</button>
+    </div>
+    <b>Локальный ИИ</b><br>GGUF-модели из папки data/models, работа на CPU.
+    <div class="api-status" id="apiStatus"><span class="dot"></span><span>Проверка backend…</span></div>
+  </div>
+</aside>
+
+<!-- ================= MAIN ================= -->
+<main class="main">
+
+  <!-- ===== ВКЛАДКА АККАУНТЫ ===== -->
+  <div id="tabAccounts" class="settings-content active">
+    <div class="topbar">
+      <div class="title-block">
+        <h1>Аккаунты</h1>
+        <p>Список подключённых Telegram-аккаунтов и их состояние</p>
+      </div>
+      <div class="topbar-actions">
+        <div class="search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input id="searchInput" placeholder="Поиск по номеру или имени">
+        </div>
+        <button class="btn btn-primary" id="addAccountBtn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
+          Добавить аккаунт
+        </button>
+      </div>
+    </div>
+
+    <div class="quota-banner" id="quotaBanner" hidden></div>
+
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-label">Всего аккаунтов</div>
+        <div class="stat-value" id="statTotal">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Активны</div>
+        <div class="stat-value green" id="statActive">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Неактивны</div>
+        <div class="stat-value amber" id="statInactive">0</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">ИИ-агенты</div>
+        <div class="stat-value green" id="statAgents">0</div>
+      </div>
+    </div>
+
+    <div class="grid" id="grid"></div>
+  </div>
+
+<!-- ===== ВКЛАДКА НАСТРОЙКИ ===== -->
+  <div id="tabSettings" class="settings-content">
+    <div class="topbar">
+      <div class="title-block">
+        <h1>Настройки</h1>
+        <p>Модели, персонажи и удалённый ПК для генерации</p>
+      </div>
+    </div>
+
+    <div class="settings-tabs">
+      <button class="settings-tab active admin-only" data-panel="models">Модели</button>
+      <button class="settings-tab" data-panel="characters">Персонажи</button>
+      <button class="settings-tab admin-only" data-panel="workers">Удалённый ПК</button>
+      <button class="settings-tab" data-panel="system">Система</button>
+    </div>
+
+    <div class="settings-panel active" id="panelModels">
+      <div class="settings-card">
+        <h3>Загрузить GGUF</h3>
+        <p class="desc">Файл остаётся на этом компьютере в data/models. Для CPU удобнее квантизация Q4_K_M.</p>
+        <div class="upload-zone" id="uploadArea">
+          <b>Нажмите или перетащите .gguf</b>
+          <span>Можно просто скопировать файл в папку data/models</span>
+          <input type="file" id="fileInput" accept=".gguf">
+          <div class="upload-bar" id="uploadProgress"><span id="progressFill"></span></div>
+        </div>
+        <div class="upload-status" id="uploadStatus">Готов к загрузке</div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Рекомендуемые для CPU</h3>
+        <p class="desc">Скачиваются с Hugging Face. GPU не нужен. Для теста — 1.5B, для живого диалога — 3B.</p>
+        <div id="recommendedList" class="model-list"></div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Загруженные модели</h3>
+        <p class="desc">Локальные файлы из data/models.</p>
+        <div class="empty-hint" id="emptyModels">Нет загруженных моделей</div>
+        <div class="model-list" id="modelList"></div>
+      </div>
+
+      <div class="settings-card">
+        <h3>Модель по умолчанию</h3>
+        <p class="desc">Её предложит диалог запуска агента.</p>
+        <div class="row-actions">
+          <select class="text-input" id="defaultModelSelect">
+            <option value="">— Не выбрано —</option>
+          </select>
+          <button class="btn btn-primary" id="setDefaultBtn">Сохранить</button>
+          <button class="btn btn-ghost" id="clearDefaultBtn">Сбросить</button>
+        </div>
+        <p class="muted" style="margin-top:12px">Сейчас: <b id="currentDefaultDisplay">не задана</b></p>
+      </div>
+    </div>
+
+    <div class="settings-panel" id="panelCharacters">
+      <div class="settings-card">
+        <h3>Новый персонаж</h3>
+        <p class="desc">Имя, возраст, город и хобби. При запуске агента выберите карточку — модель будет отвечать от этого лица.</p>
+        <form id="characterForm">
+          <div class="settings-grid">
+            <div class="field"><label>Имя</label><input class="text-input" id="charName" required placeholder="Милана"></div>
+            <div class="field"><label>Возраст</label><input class="text-input" id="charAge" type="number" min="18" placeholder="23"></div>
+            <div class="field"><label>Город</label><input class="text-input" id="charCity" placeholder="Москва"></div>
+            <div class="field">
+              <label>Кто это</label>
+              <select class="text-input" id="charGender">
+                <option value="female">Девушка</option>
+                <option value="male">Парень</option>
+                <option value="other">Другое</option>
+              </select>
+            </div>
+            <div class="field wide"><label>Занятие</label><input class="text-input" id="charOccupation" placeholder="фотограф, бармен…"></div>
+            <div class="field wide"><label>Хобби и детали</label><textarea class="text-input" id="charHobbies" rows="2" placeholder="йога, сериалы, кот Барсик, гуляю с кофе"></textarea></div>
+            <div class="field wide"><label>О себе</label><textarea class="text-input" id="charBio" rows="3" placeholder="Характер, привычки, как говорит"></textarea></div>
+            <div class="field wide"><label>Дополнительно</label><textarea class="text-input" id="charExtra" rows="2" placeholder="Ненавидит голосовые, отвечает с задержкой вечером…"></textarea></div>
+          </div>
+          <button class="btn btn-primary" type="submit">Сохранить персонажа</button>
+        </form>
+      </div>
+      <div class="settings-card">
+        <h3>Список персонажей</h3>
+        <div id="characterList" class="model-list"></div>
+      </div>
+    </div>
+
+    <div class="settings-panel" id="panelWorkers">
+      <div class="settings-card">
+        <h3>Модель на другом компьютере</h3>
+        <p class="desc">Весь проект качать не нужно. На мощный ПК — только мини-сервер и файл .gguf. Ответы идут по сети, задержка почти как локально.</p>
+        <div class="steps">
+          <div class="step">
+            <i>1</i>
+            <div>Скачайте zip и распакуйте на ПК с видеокартой.<span>Внутри server.py, start.bat и список пакетов — без TG-Assistant.</span></div>
+          </div>
+          <div class="step">
+            <i>2</i>
+            <div>Положите модель рядом, назовите <b>model.gguf</b> и запустите start.bat.<span>Откройте порт 8088 в файрволе. Или: start.bat C:\path\file.gguf</span></div>
+          </div>
+          <div class="step">
+            <i>3</i>
+            <div>Добавьте адрес ниже и при запуске агента выберите «Удалённый ПК».<span>Пример: http://192.168.1.50:8088</span></div>
+          </div>
+        </div>
+        <button class="btn btn-primary" type="button" id="downloadWorkerBtn">Скачать tg-worker.zip</button>
+        <p class="hint-line">Уже стоит LM Studio, llama-server или Ollama? Вставьте их URL — тот же протокол /v1/chat/completions.</p>
+      </div>
+      <div class="settings-card">
+        <h3>Адрес компьютера</h3>
+        <form id="workerForm">
+          <div class="settings-grid">
+            <div class="field"><label>Имя</label><input class="text-input" id="workerName" required placeholder="Игровой ПК"></div>
+            <div class="field"><label>URL</label><input class="text-input" id="workerUrl" required placeholder="http://192.168.1.50:8088"></div>
+            <div class="field wide"><label>Ключ (если задавали --api-key)</label><input class="text-input" id="workerKey" placeholder="необязательно"></div>
+          </div>
+          <button class="btn btn-primary" type="submit">Добавить ПК</button>
+        </form>
+      </div>
+      <div class="settings-card">
+        <h3>Сохранённые ПК</h3>
+        <div id="workerList" class="model-list"></div>
+      </div>
+    </div>
+
+    <div class="settings-panel" id="panelSystem">
+      <div class="settings-card" id="delayCard" hidden>
+        <h3>Задержки ответа</h3>
+        <p class="desc">Бот сначала ждёт, отмечает входящее прочитанным, затем ещё ждёт и только потом начинает печатать. Значения в миллисекундах, от 0 до 60000.</p>
+        <form id="delayForm">
+          <div class="settings-grid">
+            <div class="field">
+              <label>Перед прочтением, мс</label>
+              <input class="text-input" id="readDelayMs" type="number" min="0" max="60000" step="50" value="800">
+            </div>
+            <div class="field">
+              <label>Перед ответом, мс</label>
+              <input class="text-input" id="replyDelayMs" type="number" min="0" max="60000" step="50" value="1500">
+            </div>
+          </div>
+          <button class="btn btn-primary" type="submit">Сохранить задержки</button>
+        </form>
+      </div>
+      <div class="settings-card">
+        <h3>Система</h3>
+        <div class="kv"><b>Версия</b><span id="appVersion">—</span></div>
+        <div class="kv"><b>API</b><span id="apiVersion">—</span></div>
+        <div class="kv"><b>Сервер</b><span id="serverStatus">—</span></div>
+        <div class="kv"><b>Моделей на диске</b><span id="systemModelCount">0</span></div>
+        <div class="kv"><b>В памяти</b><span id="memoryUsage">—</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tabTenants" class="settings-content">
+    <div class="topbar">
+      <div class="title-block">
+        <h1>Подписки</h1>
+        <p>Панели клиентов: доступ, лимиты, мощность и какая модель крутится</p>
+      </div>
+    </div>
+    <div class="tenants-layout">
+      <div class="settings-card">
+        <h3 id="tenantFormTitle">Новая панель</h3>
+        <p class="desc">Логин и пароль — для входа арендатора. Модель и воркер он сам не выбирает.</p>
+        <form id="tenantForm">
+          <div class="settings-grid">
+            <div class="field"><label>Название</label><input class="text-input" id="tenantName" required placeholder="Студия А"></div>
+            <div class="field"><label>Логин</label><input class="text-input" id="tenantLogin" required placeholder="studio_a"></div>
+            <div class="field"><label>Пароль</label><input class="text-input" id="tenantPassword" type="password" required placeholder="минимум 4 символа"></div>
+            <div class="field">
+              <label>Мощность</label>
+              <select class="text-input" id="tenantPower">
+                <option value="low">low — 2 акк. / 8 чатов / 1 агент</option>
+                <option value="medium" selected>medium — 5 / 25 / 3</option>
+                <option value="high">high — 15 / 80 / 8</option>
+              </select>
+            </div>
+            <div class="field"><label>Макс. аккаунтов</label><input class="text-input" id="tenantMaxAccounts" type="number" min="1" value="5"></div>
+            <div class="field"><label>Чатов на аккаунт</label><input class="text-input" id="tenantMaxChats" type="number" min="1" value="25"></div>
+            <div class="field"><label>Макс. агентов</label><input class="text-input" id="tenantMaxAgents" type="number" min="1" value="3"></div>
+            <div class="field">
+              <label>Перед прочтением, мс</label>
+              <input class="text-input" id="tenantReadDelay" type="number" min="0" max="60000" step="50" value="800">
+            </div>
+            <div class="field">
+              <label>Перед ответом, мс</label>
+              <input class="text-input" id="tenantReplyDelay" type="number" min="0" max="60000" step="50" value="1500">
+            </div>
+            <div class="field">
+              <label>Движок</label>
+              <select class="text-input" id="tenantEngine">
+                <option value="local">Этот сервер</option>
+                <option value="remote">Удалённый ПК</option>
+              </select>
+            </div>
+            <div class="field"><label>Модель</label><select class="text-input" id="tenantModel"></select></div>
+            <div class="field"><label>Воркер</label><select class="text-input" id="tenantWorker"></select></div>
+            <div class="field wide"><label>Заметка</label><textarea class="text-input" id="tenantNote" rows="2" placeholder="тариф, контакты…"></textarea></div>
+          </div>
+          <div class="card-actions">
+            <button class="btn btn-primary" type="submit">Сохранить</button>
+            <button class="btn btn-ghost" type="button" id="tenantResetBtn">Сброс формы</button>
+          </div>
+        </form>
+      </div>
+      <div class="settings-card">
+        <h3>Выданные панели</h3>
+        <div id="tenantList" class="tenant-list"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ================= ADD ACCOUNT MODAL ================= -->
+<div class="overlay" id="overlay">
+  <div class="modal" id="modal">
+    <!-- STEP 1: phone -->
+    <div id="stepPhone">
+      <div class="modal-head">
+        <h2>Новый аккаунт</h2>
+        <button class="close-x">✕</button>
+      </div>
+      <div class="modal-steps"><div class="step-dot done"></div><div class="step-dot"></div><div class="step-dot"></div></div>
+      <p class="modal-sub">Введите номер телефона, привязанный к Telegram-аккаунту. Мы отправим на него код подтверждения.</p>
+      <div class="error-text" id="errPhone"></div>
+      <div class="field">
+        <label>Номер телефона</label>
+        <div class="phone-row">
+          <input class="text-input cc-input" id="ccInput" value="+7" maxlength="6">
+          <input class="text-input" id="phoneInput" placeholder="9XX XXX-XX-XX" style="flex:1">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost close-x">Отмена</button>
+        <button class="btn btn-primary" id="btnSendCode">Получить код</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: code -->
+    <div id="stepCode" style="display:none">
+      <div class="modal-head">
+        <h2>Введите код</h2>
+        <button class="close-x">✕</button>
+      </div>
+      <div class="modal-steps"><div class="step-dot done"></div><div class="step-dot done"></div><div class="step-dot"></div></div>
+      <p class="modal-sub">Код отправлен в Telegram на номер <b id="codePhoneLabel"></b></p>
+      <div class="error-text" id="errCode"></div>
+      <div class="field">
+        <label>Код подтверждения</label>
+        <div class="code-row">
+          <input class="code-box" maxlength="1" inputmode="numeric">
+          <input class="code-box" maxlength="1" inputmode="numeric">
+          <input class="code-box" maxlength="1" inputmode="numeric">
+          <input class="code-box" maxlength="1" inputmode="numeric">
+          <input class="code-box" maxlength="1" inputmode="numeric">
+        </div>
+        <div class="hint">Не пришёл код? <a id="resendCodeLink">Отправить повторно</a></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" data-back="phone">Назад</button>
+        <button class="btn btn-primary" id="btnVerifyCode">Подтвердить</button>
+      </div>
+    </div>
+
+    <!-- STEP 2.5: 2FA -->
+    <div id="step2FA" style="display:none">
+      <div class="modal-head">
+        <h2>Облачный пароль</h2>
+        <button class="close-x">✕</button>
+      </div>
+      <div class="modal-steps"><div class="step-dot done"></div><div class="step-dot done"></div><div class="step-dot done"></div></div>
+      <p class="modal-sub">На этом аккаунте включена двухфакторная аутентификация. Введите облачный пароль, чтобы завершить вход.</p>
+      <div class="error-text" id="err2fa"></div>
+      <div class="field">
+        <label>Пароль (2FA)</label>
+        <input class="text-input" type="password" id="twoFaInput" placeholder="Введите пароль" style="font-family:var(--font-ui)">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" data-back="code">Назад</button>
+        <button class="btn btn-primary" id="btnVerify2fa">Войти</button>
+      </div>
+    </div>
+
+    <!-- STEP 3: loading -->
+    <div id="stepLoading" style="display:none">
+      <div class="loading-row"><div class="spinner"></div> Сохраняем сессию на сервере…</div>
+    </div>
+
+    <!-- STEP 4: success -->
+    <div id="stepSuccess" style="display:none">
+      <div class="success-wrap">
+        <div class="success-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <h2>Аккаунт подключён</h2>
+        <p>Сессия сохранена на сервере. Аккаунт появился в списке.</p>
+        <div class="session-chip" id="sessionChip"></div>
+        <div class="modal-footer" style="margin-top:22px; width:100%">
+          <button class="btn btn-primary" style="width:100%" id="finishBtn">Готово</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="agentOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h2>Запуск ИИ-агента</h2>
+      <button class="close-x" id="agentCloseBtn">✕</button>
+    </div>
+    <p class="modal-sub">Пишите этому аккаунту из <b>другого</b> Telegram. Модель можно крутить на этом ПК или на удалённом. Персонаж задаёт, кем является ИИ.</p>
+    <div class="quota-banner" id="agentAssignedNote" hidden></div>
+    <div class="error-text" id="errAgent"></div>
+    <div class="field">
+      <label>Где считать модель</label>
+      <div class="radio-row">
+        <label><input type="radio" name="agentEngine" id="engineLocal" value="local" checked> Этот ПК</label>
+        <label><input type="radio" name="agentEngine" id="engineRemote" value="remote"> Удалённый ПК</label>
+      </div>
+    </div>
+    <div class="field">
+      <label>Персонаж</label>
+      <select class="text-input" id="agentCharacterSelect"></select>
+    </div>
+    <div id="agentLocalFields">
+      <div class="field">
+        <label>Модель на этом ПК</label>
+        <select class="text-input" id="agentModelSelect" style="font-family:var(--font-ui)"></select>
+      </div>
+    </div>
+    <div id="agentRemoteFields" style="display:none">
+      <div class="field">
+        <label>Удалённый компьютер</label>
+        <select class="text-input" id="agentWorkerSelect"></select>
+      </div>
+    </div>
+    <div class="field">
+      <label>Доп. стиль (необязательно)</label>
+      <textarea class="text-input" id="agentPersona" rows="2" placeholder="Можно оставить пустым, если выбран персонаж"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" id="agentCancelBtn">Отмена</button>
+      <button class="btn btn-primary" id="agentStartBtn">Запустить</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="consoleOverlay">
+  <div class="modal console-modal">
+    <div class="modal-head">
+      <h2>Консоль разработчика</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-ghost btn-sm" id="consoleClearBtn">Очистить</button>
+        <button class="close-x" id="consoleCloseBtn">✕</button>
+      </div>
+    </div>
+    <p class="modal-sub">Живые логи backend: загрузка модели, входящие ЛС, генерация, ошибки.</p>
+    <div class="console-log" id="consoleLog"></div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toastWrap"></div>
+
+<script src="js/api.js"></script>
+<script src="js/accounts.js"></script>
+<script src="js/wizard.js"></script>
+<script src="js/settings.js"></script>
+<script src="js/tenants.js"></script>
+<script src="js/console.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>
