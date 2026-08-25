@@ -16,4 +16,7 @@ venv/
 .vscode/
 *.session
 *.session-journal
+remote-worker/runtime*/
+remote-worker/runtime-cpu/
+remote-worker/runtime-cuda/
 

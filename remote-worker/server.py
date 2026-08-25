@@ -17,6 +17,8 @@ import asyncio
 import json
 import logging
 import os
+import socket
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn
@@ -31,6 +33,27 @@ log = logging.getLogger("worker")
 llm = None
 loaded_name = None
 device_label = "cpu"
+load_error: Optional[str] = None
+loading = False
+
+
+def _lan_urls(port: int) -> list[str]:
+    ips: list[str] = []
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 80))
+        ips.append(sock.getsockname()[0])
+        sock.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    return [f"http://{ip}:{port}" for ip in ips]
 
 
 class ChatMessage(BaseModel):
@@ -47,20 +70,59 @@ class ChatRequest(BaseModel):
     stream: bool = False
 
 
+def _prepare_native_libs() -> None:
+    """Windows: llama.dll не грузится, если не видит CUDA / VC++ runtime."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    dirs: list[str] = []
+    cuda = os.environ.get("CUDA_PATH")
+    if cuda:
+        dirs += [os.path.join(cuda, "bin"), os.path.join(cuda, "bin", "x64")]
+    toolkit = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    if os.path.isdir(toolkit):
+        for name in sorted(os.listdir(toolkit), reverse=True):
+            dirs.append(os.path.join(toolkit, name, "bin"))
+    try:
+        import site
+        for root in list(site.getsitepackages()) + [site.getusersitepackages()]:
+            dirs.append(os.path.join(root, "llama_cpp", "lib"))
+    except Exception:
+        pass
+    seen: set[str] = set()
+    for path in dirs:
+        if not path or path in seen or not os.path.isdir(path):
+            continue
+        seen.add(path)
+        try:
+            os.add_dll_directory(path)
+        except OSError:
+            os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+
+
 def load_model(path: str, n_ctx: int, n_gpu_layers: int) -> None:
     global llm, loaded_name, device_label
-    from llama_cpp import Llama
+    if n_gpu_layers <= 0:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    _prepare_native_libs()
+    try:
+        from llama_cpp import Llama
+    except Exception as exc:
+        raise RuntimeError(
+            "Не загрузился llama.dll. Запустите start.bat ещё раз. "
+            "Если не поможет: https://aka.ms/vs/17/release/vc_redist.x64.exe "
+            f"({exc})"
+        ) from exc
 
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Нет файла модели: {path}")
 
-    n_threads = os.cpu_count() or 4
+    n_threads = max(1, (os.cpu_count() or 4) - 1)
     kwargs = dict(
         model_path=path,
         n_ctx=n_ctx,
         n_threads=n_threads,
         n_gpu_layers=n_gpu_layers,
-        n_batch=512,
+        n_batch=256,
         use_mmap=True,
         logits_all=False,
         embedding=False,
@@ -68,17 +130,47 @@ def load_model(path: str, n_ctx: int, n_gpu_layers: int) -> None:
         verbose=False,
     )
     try:
-        model = Llama(**kwargs, n_threads_batch=n_threads, n_ubatch=512)
-    except TypeError:
         model = Llama(**kwargs)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == -1073741795 or "0xc000001d" in str(exc).lower():
+            raise RuntimeError(
+                "Процессор не принимает эту сборку llama.cpp (ошибка 0xc000001d). "
+                "Закройте окно и снова запустите start.bat — он поставит другую CPU-версию."
+            ) from exc
+        raise
     llm = model
     loaded_name = os.path.basename(path)
     device_label = "gpu" if n_gpu_layers else "cpu"
     log.info("Готово: %s (%s, ctx=%s)", loaded_name, device_label, n_ctx)
 
 
-def create_app(api_key: str = "") -> FastAPI:
-    app = FastAPI(title="TG worker", version="1.0")
+def create_app(
+    api_key: str = "",
+    model_path: str = "",
+    n_ctx: int = 1024,
+    n_gpu_layers: int = 0,
+) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        global loading, load_error
+        loading = True
+        load_error = None
+
+        def _load() -> None:
+            global loading, load_error
+            try:
+                load_model(model_path, n_ctx, n_gpu_layers)
+            except Exception as exc:
+                load_error = str(exc)
+                log.exception("Модель не загрузилась")
+            finally:
+                loading = False
+
+        task = asyncio.create_task(asyncio.to_thread(_load))
+        yield
+        task.cancel()
+
+    app = FastAPI(title="TG worker", version="1.0", lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -96,7 +188,13 @@ def create_app(api_key: str = "") -> FastAPI:
     @app.get("/health")
     async def health(authorization: Optional[str] = Header(default=None)):
         _auth(authorization)
-        return {"ok": True, "model": loaded_name, "device": device_label}
+        return {
+            "ok": llm is not None and not loading,
+            "loading": loading,
+            "model": loaded_name,
+            "device": device_label,
+            "error": load_error,
+        }
 
     @app.get("/v1/models")
     async def models(authorization: Optional[str] = Header(default=None)):
@@ -107,7 +205,12 @@ def create_app(api_key: str = "") -> FastAPI:
     async def chat(payload: ChatRequest, authorization: Optional[str] = Header(default=None)):
         _auth(authorization)
         if llm is None:
-            raise HTTPException(status_code=503, detail="Модель не загружена")
+            if loading:
+                raise HTTPException(status_code=503, detail="Модель ещё загружается, подождите строку Готово в start.bat")
+            raise HTTPException(
+                status_code=503,
+                detail=load_error or "Модель не загружена. Рядом со start.bat должен лежать model.gguf, окно не закрывайте.",
+            )
         messages = [{"role": m.role, "content": m.content} for m in payload.messages]
         log.info("Генерация, сообщений: %s stream=%s", len(messages), payload.stream)
 
@@ -170,9 +273,17 @@ def main() -> None:
     parser.add_argument("--api-key", default="")
     args = parser.parse_args()
     layers = args.gpu_layers if args.gpu else 0
-    load_model(args.model, args.n_ctx, layers)
-    log.info("Слушаю http://%s:%s  (в панели укажите IP этого ПК)", args.host, args.port)
-    uvicorn.run(create_app(args.api_key), host=args.host, port=args.port, log_level="info")
+    urls = _lan_urls(args.port)
+    log.info("Слушаю порт %s. В панели TG-Assistant укажите:", args.port)
+    for url in urls or [f"http://<IP-этого-ПК>:{args.port}"]:
+        log.info("  %s", url)
+    log.info("Окно не закрывайте. Модель грузится после открытия порта.")
+    uvicorn.run(
+        create_app(args.api_key, args.model, args.n_ctx, layers),
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
 
 
 if __name__ == "__main__":

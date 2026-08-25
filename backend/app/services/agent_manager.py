@@ -225,7 +225,7 @@ class AgentManager:
             worker = self._workers.get(worker_id)
             if not worker:
                 raise ValueError("Удалённый компьютер не найден — добавьте его в Настройках")
-            await self._workers.ping(worker_id)
+            await self._workers.wait_ready(worker_id)
             model_label = f"remote:{worker['name']}"
 
         state = AgentState(

@@ -30,47 +30,106 @@ class RecommendedModel:
     name: str
     filename: str
     repo_id: str
+    kind: str
     size_label: str
     ram_label: str
+    vram_label: str
     speed: str
     quality: str
     description: str
 
 
-# Q4_K_M — лучший баланс качество/скорость на CPU без видеокарты.
 RECOMMENDED: list[RecommendedModel] = [
     RecommendedModel(
         id="qwen25-15b",
-        name="Qwen2.5 1.5B Instruct Q4_K_M",
+        name="Qwen 2.5 1.5B",
         filename="qwen2.5-1.5b-instruct-q4_k_m.gguf",
         repo_id="Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-        size_label="~1.0 ГБ",
-        ram_label="~3 ГБ RAM",
-        speed="очень быстро",
-        quality="достаточно для теста",
-        description="Самый быстрый вариант для проверки пайплайна на CPU. Русский язык держит, ответы короткие.",
+        kind="cpu",
+        size_label="1.0 ГБ",
+        ram_label="3 ГБ RAM",
+        vram_label="—",
+        speed="мгновенно",
+        quality="тест пайплайна",
+        description="Самый быстрый прогон на этом ПК. Русский держит, ответы короткие.",
     ),
     RecommendedModel(
         id="qwen25-3b",
-        name="Qwen2.5 3B Instruct Q4_K_M",
+        name="Qwen 2.5 3B",
         filename="qwen2.5-3b-instruct-q4_k_m.gguf",
         repo_id="Qwen/Qwen2.5-3B-Instruct-GGUF",
-        size_label="~2.0 ГБ",
-        ram_label="~5 ГБ RAM",
+        kind="cpu",
+        size_label="1.9 ГБ",
+        ram_label="5 ГБ RAM",
+        vram_label="—",
         speed="быстро",
-        quality="рекомендуется",
-        description="Оптимум для диалога «как человек» на процессоре. Лучше держит контекст и русский язык.",
+        quality="живой диалог",
+        description="Оптимум для CPU: скорость и русский без видеокарты.",
+    ),
+    RecommendedModel(
+        id="llama32-3b",
+        name="Llama 3.2 3B",
+        filename="Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        repo_id="bartowski/Llama-3.2-3B-Instruct-GGUF",
+        kind="cpu",
+        size_label="2.0 ГБ",
+        ram_label="5 ГБ RAM",
+        vram_label="—",
+        speed="быстро",
+        quality="другой стиль",
+        description="Сравнение с Qwen на том же железе. Английский сильнее, русский слабее.",
+    ),
+    RecommendedModel(
+        id="qwen25-7b-q5",
+        name="Qwen 2.5 7B Q5",
+        filename="qwen2.5-7b-instruct-q5_k_m.gguf",
+        repo_id="Qwen/Qwen2.5-7B-Instruct-GGUF",
+        kind="gpu",
+        size_label="5.4 ГБ",
+        ram_label="8 ГБ RAM",
+        vram_label="8 ГБ VRAM",
+        speed="быстро на GPU",
+        quality="чистое 7B",
+        description="На игровом ПК целиком в VRAM. Лучше 7B Q4, почти без просадки скорости.",
+    ),
+    RecommendedModel(
+        id="qwen25-14b",
+        name="Qwen 2.5 14B",
+        filename="qwen2.5-14b-instruct-q4_k_m.gguf",
+        repo_id="Qwen/Qwen2.5-14B-Instruct-GGUF",
+        kind="gpu",
+        size_label="8.4 ГБ",
+        ram_label="12 ГБ RAM",
+        vram_label="10–12 ГБ VRAM",
+        speed="средне",
+        quality="заметно умнее",
+        description="Имеет смысл при видеокарте от 12 ГБ. На игровом ПК — как model.gguf.",
     ),
     RecommendedModel(
         id="qwen25-7b",
-        name="Qwen2.5 7B Instruct Q4_K_M",
+        name="Qwen 2.5 7B Q4",
         filename="qwen2.5-7b-instruct-q4_k_m.gguf",
         repo_id="Qwen/Qwen2.5-7B-Instruct-GGUF",
-        size_label="~4.7 ГБ",
-        ram_label="~8 ГБ RAM",
-        speed="медленнее",
-        quality="высокое",
-        description="Заметно умнее на CPU, но генерация занимает несколько секунд. Берите, если есть 16+ ГБ RAM.",
+        kind="hybrid",
+        size_label="4.7 ГБ",
+        ram_label="8 ГБ RAM",
+        vram_label="6 ГБ VRAM + RAM",
+        speed="GPU, иначе медленно",
+        quality="рабочий диалог",
+        description="Слои на видеокарте, хвост на CPU. Тот же файл идёт и чисто на процессоре.",
+    ),
+    RecommendedModel(
+        id="llama31-8b",
+        name="Llama 3.1 8B",
+        filename="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+        repo_id="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        kind="hybrid",
+        size_label="4.9 ГБ",
+        ram_label="10 ГБ RAM",
+        vram_label="8 ГБ VRAM + RAM",
+        speed="средне",
+        quality="другой характер",
+        description="Оффлоад на 8 ГБ карте. Для сравнения качества с Qwen 7B.",
     ),
 ]
 
@@ -177,8 +236,12 @@ class ModelCatalog:
                 "name": m.name,
                 "filename": m.filename,
                 "repo_id": m.repo_id,
+                "kind": m.kind,
+                "hf_url": f"https://huggingface.co/{m.repo_id}",
+                "file_url": f"https://huggingface.co/{m.repo_id}/blob/main/{m.filename}",
                 "size_label": m.size_label,
                 "ram_label": m.ram_label,
+                "vram_label": m.vram_label,
                 "speed": m.speed,
                 "quality": m.quality,
                 "description": m.description,
@@ -275,8 +338,3 @@ class ModelCatalog:
             encoding="utf-8",
         )
 
-
-if not hasattr(ModelCatalog, "list_local"):
-    ModelCatalog.list_local = ModelCatalog.list_local
-if not hasattr(ModelCatalog, "list_local"):
-    ModelCatalog.list_local = ModelCatalog.list_local

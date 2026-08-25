@@ -244,6 +244,7 @@ class LLMEngine:
             self._http = httpx.AsyncClient(
                 timeout=httpx.Timeout(180.0, connect=6.0),
                 limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+                trust_env=False,
             )
         return self._http
 
@@ -416,16 +417,39 @@ class LLMEngine:
         base = _remote_base(url)
         logger.info("Запрос к удалённому API %s …", base)
         client = await self._http_client()
-        text = await self._remote_stream(client, base, headers, payload, on_partial)
-        if text is None:
-            res = await client.post(
-                base + "/v1/chat/completions",
-                headers=headers,
-                json=payload,
+        text = ""
+        last_err = "нет ответа"
+        for attempt in range(1, 13):
+            try:
+                streamed = await self._remote_stream(client, base, headers, payload, on_partial)
+                if streamed is not None:
+                    text = streamed
+                    break
+                res = await client.post(
+                    base + "/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                if res.status_code == 503:
+                    last_err = _remote_error_text(res)
+                    logger.info("Удалённая модель не готова (%s), попытка %s", last_err, attempt)
+                    await asyncio.sleep(5)
+                    continue
+                res.raise_for_status()
+                data = res.json()
+                text = data["choices"][0]["message"].get("content") or ""
+                break
+            except httpx.HTTPStatusError as exc:
+                last_err = _remote_error_text(exc.response)
+                if exc.response is not None and exc.response.status_code == 503 and attempt < 12:
+                    await asyncio.sleep(5)
+                    continue
+                raise ValueError(last_err) from exc
+        else:
+            raise ValueError(
+                last_err
+                or "На удалённом ПК модель ещё не готова. В окне start.bat дождитесь строки «Готово»."
             )
-            res.raise_for_status()
-            data = res.json()
-            text = data["choices"][0]["message"].get("content") or ""
         cleaned = _cleanup(text)
         last_user = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
         prev_assistant = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "assistant"), "")
@@ -451,6 +475,12 @@ class LLMEngine:
             ) as res:
                 if res.status_code >= 400:
                     await res.aread()
+                    if res.status_code == 503:
+                        raise httpx.HTTPStatusError(
+                            "модель не готова",
+                            request=res.request,
+                            response=res,
+                        )
                     return None
                 ctype = (res.headers.get("content-type") or "").lower()
                 if "text/event-stream" in ctype:
@@ -475,9 +505,31 @@ class LLMEngine:
                 raw = await res.aread()
                 data = json.loads(raw)
                 return data["choices"][0]["message"].get("content") or ""
+        except httpx.HTTPStatusError:
+            raise
         except Exception:
             logger.debug("Стрим удалённой модели недоступен, обычный запрос", exc_info=True)
             return None
+
+
+def _remote_error_text(response: Optional[httpx.Response]) -> str:
+    if response is None:
+        return "Удалённый ПК не ответил"
+    detail = ""
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            detail = str(data.get("detail") or data.get("error") or "")
+        elif isinstance(data, str):
+            detail = data
+    except Exception:
+        detail = (response.text or "")[:300]
+    if response.status_code == 503:
+        return detail or (
+            "На удалённом ПК модель ещё не готова. "
+            "В окне start.bat дождитесь строки «Готово» и напишите ещё раз."
+        )
+    return detail or f"Ошибка удалённого API: {response.status_code}"
 
 
 def _chunk_delta(chunk: dict) -> str:

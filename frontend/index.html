@@ -127,9 +127,9 @@
       </div>
 
       <div class="settings-card">
-        <h3>Рекомендуемые для CPU</h3>
-        <p class="desc">Скачиваются с Hugging Face. GPU не нужен. Для теста — 1.5B, для живого диалога — 3B.</p>
-        <div id="recommendedList" class="model-list"></div>
+        <h3>Тест качества и скорости</h3>
+        <p class="desc">Один квант Q4/Q5 на режим. Скачайте сюда или положите файл как <b>model.gguf</b> на игровой ПК.</p>
+        <div id="recommendedList" class="bench-list"></div>
       </div>
 
       <div class="settings-card">
@@ -191,15 +191,15 @@
         <div class="steps">
           <div class="step">
             <i>1</i>
-            <div>Скачайте zip и распакуйте на ПК с видеокартой.<span>Внутри server.py, start.bat и список пакетов — без TG-Assistant.</span></div>
+            <div>Скачайте zip и распакуйте на игровом ПК.<span>Python не нужен. Первый запуск сам скачает llama-server.</span></div>
           </div>
           <div class="step">
             <i>2</i>
-            <div>Положите модель рядом, назовите <b>model.gguf</b> и запустите start.bat.<span>Откройте порт 8088 в файрволе. Или: start.bat C:\path\file.gguf</span></div>
+            <div>Положите модель рядом, назовите <b>model.gguf</b> и запустите start.bat.<span>Окно не закрывайте. На том ПК запустите open-firewall.bat от администратора — нужен входящий TCP 8088, не исходящий.</span></div>
           </div>
           <div class="step">
             <i>3</i>
-            <div>Добавьте адрес ниже и при запуске агента выберите «Удалённый ПК».<span>Пример: http://192.168.1.50:8088</span></div>
+            <div>Добавьте адрес из окна сервера (не IP этого ноутбука) и при запуске агента выберите «Удалённый ПК».<span>Пример: http://192.168.1.50:8088 — проверка: на этом ПК в браузере должен открыться http://IP:8088/health</span></div>
           </div>
         </div>
         <button class="btn btn-primary" type="button" id="downloadWorkerBtn">Скачать tg-worker.zip</button>

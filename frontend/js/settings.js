@@ -61,6 +61,7 @@ class SettingsManager {
         tab.classList.add('active');
         const panel = this.container.querySelector(`#panel${tab.dataset.panel[0].toUpperCase()}${tab.dataset.panel.slice(1)}`);
         if (panel) panel.classList.add('active');
+        if (tab.dataset.panel === 'models') this.refresh();
         if (tab.dataset.panel === 'system') this._loadSystem();
         if (tab.dataset.panel === 'characters') this._loadCharacters();
         if (tab.dataset.panel === 'workers') this._loadWorkers();
@@ -172,23 +173,51 @@ class SettingsManager {
     });
   }
 
+  _esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[ch]));
+  }
+
   _renderRecommended(items) {
     const box = document.getElementById('recommendedList');
     if (!box) return;
-    box.innerHTML = items.map((m) => `
-      <div class="model-item">
-        <div class="model-info">
-          <span class="model-name">${m.name}</span>
-          <span class="model-size">${m.size_label} · ${m.ram_label} · ${m.speed}</span>
-          ${m.downloaded ? '<span class="status-pill">скачана</span>' : `<span class="status-pill">${m.quality}</span>`}
-        </div>
-        <div class="model-actions">
-          ${m.downloaded
-            ? '<span class="status-pill">готово</span>'
-            : `<button class="btn-ghost-sm" data-dl="${m.id}">Скачать</button>`}
-        </div>
-      </div>
-      <div class="hint-line" style="margin:-4px 0 10px; padding:0 4px;">${m.description}</div>`).join('');
+    const groups = [
+      { id: 'cpu', title: 'CPU', hint: 'Этот компьютер, без видеокарты' },
+      { id: 'gpu', title: 'GPU', hint: 'Игровой ПК, модель целиком в VRAM' },
+      { id: 'hybrid', title: 'CPU+GPU', hint: 'Часть слоёв на карте, остальное в RAM' },
+    ];
+    box.innerHTML = groups.map((group) => {
+      const rows = items.filter((m) => m.kind === group.id);
+      if (!rows.length) return '';
+      return `
+        <div class="bench-group">
+          <div class="bench-head">
+            <span class="bench-tag bench-tag-${group.id}">${group.title}</span>
+            <span class="bench-hint">${this._esc(group.hint)}</span>
+          </div>
+          ${rows.map((m) => {
+            const mem = m.kind === 'cpu' ? m.ram_label : m.vram_label;
+            return `
+            <div class="bench-row">
+              <div class="bench-main">
+                <div class="bench-title">
+                  <span class="model-name">${this._esc(m.name)}</span>
+                  ${m.downloaded ? '<span class="status-pill">скачана</span>' : `<span class="status-pill">${this._esc(m.quality)}</span>`}
+                </div>
+                <div class="bench-meta">${this._esc(m.size_label)} · ${this._esc(mem)} · ${this._esc(m.speed)}</div>
+                <div class="bench-desc">${this._esc(m.description)}</div>
+              </div>
+              <div class="model-actions">
+                <a class="hf-link" href="${this._esc(m.hf_url)}" target="_blank" rel="noopener noreferrer">HF</a>
+                ${m.downloaded
+                  ? ''
+                  : `<button class="btn-ghost-sm" data-dl="${this._esc(m.id)}">Скачать</button>`}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>`;
+    }).join('');
     box.querySelectorAll('[data-dl]').forEach((btn) => {
       btn.addEventListener('click', () => this._download(btn.dataset.dl, btn));
     });
@@ -363,7 +392,11 @@ class SettingsManager {
           btn.disabled = true;
           try {
             const st = await this.api.pingWorker(btn.dataset.ping);
-            this.onToast(`Онлайн: ${st.model || 'ok'} (${st.device || ''})`, 'success');
+            if (st.loading || !st.ok) {
+              this.onToast('Сервер онлайн, модель ещё загружается. Дождитесь «Готово» в start.bat', 'error');
+            } else {
+              this.onToast(`Онлайн: ${st.model || 'ok'} (${st.device || ''})`, 'success');
+            }
           } catch (err) {
             this.onToast(err.message, 'error');
           } finally {

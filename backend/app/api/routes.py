@@ -312,7 +312,7 @@ async def list_workers(user: dict = Depends(current_user)):
 async def worker_bundle(_: dict = Depends(admin_user)):
     """ZIP с мини-сервером модели — весь проект качать не нужно."""
     root = Path(__file__).resolve().parents[3] / "remote-worker"
-    names = ("server.py", "requirements.txt", "start.bat", "start.sh")
+    names = ("start.bat", "open-firewall.bat", "fetch-runtime.ps1", "run-server.ps1")
     missing = [n for n in names if not (root / n).exists()]
     if missing:
         raise HTTPException(status_code=500, detail="Пакет воркера не собран")
