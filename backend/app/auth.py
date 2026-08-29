@@ -1,7 +1,7 @@
 """Авторизация: текущий пользователь и доступ к аккаунтам."""
 from fastapi import Depends, HTTPException, Request
 
-from app.deps import rental, store
+from app.deps import rental, store, workers
 
 MAINTENANCE_DETAIL = "Технические работы. Добавление и запуск временно недоступны."
 
@@ -26,10 +26,23 @@ def admin_user(user: dict = Depends(current_user)) -> dict:
     return user
 
 
+def tenant_server_maintenance(user: dict) -> bool:
+    """Техработы включены на сервере, к которому привязан арендатор."""
+    if user.get("role") != "tenant":
+        return False
+    tenant = user.get("tenant") or {}
+    engine = (tenant.get("engine") or "local").strip().lower()
+    if engine == "remote":
+        worker_id = (tenant.get("worker_id") or "").strip()
+        worker = workers.get(worker_id) if worker_id else None
+        return bool(worker and worker.get("maintenance"))
+    return rental.is_maintenance()
+
+
 def require_tenant_writable(user: dict) -> None:
     if user.get("role") != "tenant":
         return
-    if rental.is_maintenance():
+    if tenant_server_maintenance(user):
         raise HTTPException(status_code=503, detail=MAINTENANCE_DETAIL)
 
 

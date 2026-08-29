@@ -55,6 +55,16 @@ class WorkerStore:
                 raise ValueError("Удалённый сервер не найден")
             self._write_unlocked(remaining)
 
+    def set_maintenance(self, worker_id: str, enabled: bool) -> dict:
+        with self._lock:
+            items = self._read_unlocked()
+            for worker in items:
+                if worker.get("id") == worker_id:
+                    worker["maintenance"] = bool(enabled)
+                    self._write_unlocked(items)
+                    return self._public(worker)
+        raise ValueError("Удалённый сервер не найден")
+
     async def snapshot_all(self, only_ids: Optional[list[str]] = None) -> list[dict]:
         items = self._read()
         if only_ids is not None:
@@ -73,6 +83,7 @@ class WorkerStore:
                     "model": st.get("model"),
                     "device": st.get("device"),
                     "load": st.get("load"),
+                    "maintenance": bool(w.get("maintenance")),
                 }
             except Exception as exc:
                 return {
@@ -84,6 +95,7 @@ class WorkerStore:
                     "model": None,
                     "device": None,
                     "load": None,
+                    "maintenance": bool(w.get("maintenance")),
                     "error": str(exc)[:160],
                 }
 
@@ -130,6 +142,7 @@ class WorkerStore:
             "name": worker.get("name"),
             "url": worker.get("url"),
             "has_key": bool(worker.get("api_key")),
+            "maintenance": bool(worker.get("maintenance")),
         }
 
     def _read(self) -> list[dict]:

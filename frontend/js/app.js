@@ -128,6 +128,7 @@ class AgentDialog {
 class App {
   constructor(apiBaseUrl) {
     this.api = new ApiClient(apiBaseUrl);
+    this.maintenance = false;
 
     this.accountsView = new AccountsView({
       api: this.api,
@@ -138,7 +139,13 @@ class App {
       statInactiveEl: document.getElementById('statInactive'),
       statAgentsEl: document.getElementById('statAgents'),
       toast: (type, msg) => this.toast(type, msg),
-      onStartAgent: (id) => this.agentDialog.open(id),
+      onStartAgent: (id) => {
+        if (this.maintenance) {
+          this.toast('err', 'Технические работы. Запуск агентов временно недоступен.');
+          return;
+        }
+        this.agentDialog.open(id);
+      },
     });
 
     this.wizard = new LoginWizard({
@@ -167,35 +174,55 @@ class App {
     });
     this._bindNav();
 
-    document.getElementById('addAccountBtn').addEventListener('click', () => this.wizard.open());
+    document.getElementById('addAccountBtn').addEventListener('click', () => {
+      if (this.maintenance) {
+        this.toast('err', 'Технические работы. Добавление аккаунтов временно недоступно.');
+        return;
+      }
+      this.wizard.open();
+    });
     document.getElementById('finishBtn').addEventListener('click', () => this.wizard.close());
-    document.addEventListener('open-add-modal', () => this.wizard.open());
+    document.addEventListener('open-add-modal', () => {
+      if (this.maintenance) {
+        this.toast('err', 'Технические работы. Добавление аккаунтов временно недоступно.');
+        return;
+      }
+      this.wizard.open();
+    });
   }
 
   _bindNav() {
     document.querySelectorAll('.nav-item[data-tab]').forEach((item) => {
       item.addEventListener('click', () => {
-        document.querySelectorAll('.nav-item[data-tab]').forEach((n) => n.classList.remove('active'));
-        item.classList.add('active');
-        document.querySelectorAll('.settings-content').forEach((el) => el.classList.remove('active'));
         const tab = item.dataset.tab;
-        if (tab === 'accounts') document.getElementById('tabAccounts').classList.add('active');
-        if (tab === 'cabinet') {
-          const el = document.getElementById('tabCabinet');
-          if (el) el.classList.add('active');
-          this._renderCabinet();
+        if (this.maintenance && this.user && this.user.role === 'tenant' && tab !== 'cabinet') {
+          return;
         }
-        if (tab === 'settings') {
-          document.getElementById('tabSettings').classList.add('active');
-          this.settings.refresh();
-        }
-        if (tab === 'tenants') {
-          const el = document.getElementById('tabTenants');
-          if (el) el.classList.add('active');
-          if (this.tenants) this.tenants.refresh();
-        }
+        this._openTab(tab);
       });
     });
+  }
+
+  _openTab(tab) {
+    document.querySelectorAll('.nav-item[data-tab]').forEach((n) => {
+      n.classList.toggle('active', n.dataset.tab === tab);
+    });
+    document.querySelectorAll('.settings-content').forEach((el) => el.classList.remove('active'));
+    if (tab === 'accounts') document.getElementById('tabAccounts').classList.add('active');
+    if (tab === 'cabinet') {
+      const el = document.getElementById('tabCabinet');
+      if (el) el.classList.add('active');
+      this._renderCabinet();
+    }
+    if (tab === 'settings') {
+      document.getElementById('tabSettings').classList.add('active');
+      this.settings.refresh();
+    }
+    if (tab === 'tenants') {
+      const el = document.getElementById('tabTenants');
+      if (el) el.classList.add('active');
+      if (this.tenants) this.tenants.refresh();
+    }
   }
 
   applyRole(me) {
@@ -209,10 +236,14 @@ class App {
     this.settings.role = isAdmin ? 'admin' : 'tenant';
     this.settings.setQuota(isAdmin ? null : me.quota);
     this.agentDialog.setQuota(isAdmin ? null : me.quota);
+    this.applyMaintenance(!!me.maintenance);
     this._renderCabinet();
     if (!isAdmin) {
-      const charTab = document.querySelector('.settings-tab[data-panel="characters"]');
-      if (charTab) charTab.click();
+      if (me.maintenance) this._openTab('cabinet');
+      else {
+        const charTab = document.querySelector('.settings-tab[data-panel="characters"]');
+        if (charTab) charTab.click();
+      }
     }
   }
 
@@ -257,6 +288,26 @@ class App {
       warn.innerHTML = suspended
         ? '<b>Панель приостановлена.</b> Новые аккаунты и агенты недоступны.'
         : '';
+    }
+    const cabMaint = document.getElementById('cabinetMaintBanner');
+    if (cabMaint) cabMaint.hidden = !this.maintenance;
+  }
+
+  applyMaintenance(on) {
+    const was = this.maintenance;
+    const next = !!on;
+    const isTenant = this.user && this.user.role === 'tenant';
+    this.maintenance = next;
+    document.body.classList.toggle('is-maintenance', next);
+    const cab = document.getElementById('cabinetMaintBanner');
+    if (cab) cab.hidden = !next;
+    if (isTenant && next && !was) {
+      this._openTab('cabinet');
+      if (this.wizard) this.wizard.close();
+      if (this.agentDialog) this.agentDialog.close();
+    }
+    if (isTenant && was && !next) {
+      this.toast('ok', 'Технические работы завершены. Можно снова добавлять аккаунты и запускать агентов.', 6000);
     }
   }
 
@@ -304,7 +355,11 @@ class App {
       } else {
         this._renderCabinet();
       }
-      setTimeout(poll, generating ? 1500 : booting ? 1000 : running ? 4000 : 8000);
+      if (this.user && this.user.role === 'tenant') {
+        this.api.me().then((m) => this.applyMaintenance(!!m.maintenance)).catch(() => {});
+      }
+      const wait = this.maintenance ? 2500 : (generating ? 1500 : booting ? 1000 : running ? 4000 : 8000);
+      setTimeout(poll, wait);
     };
     setTimeout(poll, 4000);
   }
@@ -322,7 +377,7 @@ class App {
     }
   }
 
-  toast(type, text) {
+  toast(type, text, ms) {
     const wrap = document.getElementById('toastWrap');
     const el = document.createElement('div');
     el.className = `toast ${type}`;
@@ -332,7 +387,7 @@ class App {
       el.style.opacity = '0';
       el.style.transition = 'opacity .25s';
       setTimeout(() => el.remove(), 250);
-    }, 3200);
+    }, ms || 3200);
   }
 }
 

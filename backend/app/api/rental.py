@@ -1,7 +1,7 @@
 """Вход, профиль и админка арендаторов."""
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
-from app.auth import admin_user, current_user
+from app.auth import admin_user, current_user, tenant_server_maintenance
 from app.deps import agents, catalog, rental, store, telegram, workers
 from app.schemas import LoginRequest, TenantPayload, TelegramPrefsPayload
 from app.services.rental_store import COOKIE, POWER_PRESETS, effective_folder_title
@@ -69,7 +69,7 @@ def logout(request: Request, response: Response):
 @router.get("/auth/me")
 def me(user: dict = Depends(current_user)):
     data = {"user": {k: user[k] for k in ("id", "login", "role", "tenant_id")}}
-    data["maintenance"] = rental.is_maintenance()
+    data["maintenance"] = tenant_server_maintenance(user)
     if user["role"] == "tenant" and user.get("tenant"):
         data["quota"] = _tenant_cabinet(user["tenant"])
         data["suspended"] = user["tenant"]["status"] != "active"
@@ -176,8 +176,16 @@ def update_my_delays(payload: TenantPayload, user: dict = Depends(current_user))
 @router.post("/admin/maintenance")
 def admin_set_maintenance(payload: dict, _: dict = Depends(admin_user)):
     enabled = bool(payload.get("enabled"))
-    rental.set_maintenance(enabled)
-    return {"maintenance": rental.is_maintenance()}
+    target = str(payload.get("target") or "local").strip() or "local"
+    if target == "local":
+        rental.set_maintenance(enabled)
+        return {"target": "local", "maintenance": rental.is_maintenance()}
+    try:
+        workers.set_maintenance(target, enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    worker = workers.get(target) or {}
+    return {"target": target, "maintenance": bool(worker.get("maintenance"))}
 
 
 @router.get("/admin/ai-options")

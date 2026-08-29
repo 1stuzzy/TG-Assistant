@@ -154,6 +154,13 @@ class ApiClient {
     return this._request('/api/system');
   }
 
+  setMaintenance(data) {
+    return this._request('/api/admin/maintenance', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   startAgent(accountId, payload) {
     return this._request(`/api/accounts/${accountId}/agent/start`, {
       method: 'POST',

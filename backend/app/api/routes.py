@@ -269,11 +269,13 @@ async def system_info(user: dict = Depends(current_user)):
         "running_agents": running,
         "models_dir": str(catalog.models_dir),
         "load": local_load,
+        "maintenance": rental.is_maintenance(),
         "memory": {
             "local": {
                 "name": "Этот сервер",
                 "ok": True,
                 "load": local_load,
+                "maintenance": rental.is_maintenance(),
             },
             "remote": remotes,
         },

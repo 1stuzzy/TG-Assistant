@@ -21,6 +21,7 @@ class SettingsManager {
     this.role = 'admin';
     this.quota = null;
     this._loadTimer = null;
+    this._bindMaint();
     this._loadSystem();
   }
 
@@ -221,6 +222,26 @@ class SettingsManager {
     }
   }
 
+  _bindMaint() {
+    const slots = document.getElementById('memorySlots');
+    if (!slots) return;
+    slots.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-maint]');
+      if (!btn || btn.disabled) return;
+      this._toggleMaint(btn.dataset.maint, btn.dataset.on === '1');
+    });
+  }
+
+  async _toggleMaint(target, currentlyOn) {
+    try {
+      await this.api.setMaintenance({ target, enabled: !currentlyOn });
+      this.onToast(currentlyOn ? 'Техработы сняты' : 'Техработы включены', 'success');
+      await this._loadSystem();
+    } catch (e) {
+      this.onToast(e.message, 'error');
+    }
+  }
+
   _startLoadPoll() {
     this._stopLoadPoll();
     this._loadTimer = setInterval(() => this._loadSystem(), 4000);
@@ -276,36 +297,45 @@ class SettingsManager {
         const local = mem.local || {};
         const remote = mem.remote || [];
         const rows = [{
+          id: 'local',
           name: local.name || 'Этот сервер',
           ok: local.ok !== false,
           kind: 'local',
           load: local.load || info.load,
+          maintenance: !!(local.maintenance || info.maintenance),
         }];
         remote.forEach((w) => {
           rows.push({
+            id: w.id || '',
             name: w.name || 'Удалённый сервер',
             ok: !!w.ok,
             kind: 'remote',
             loading: !!w.loading,
             load: w.load || null,
             error: w.error || '',
+            maintenance: !!w.maintenance,
           });
         });
         slots.innerHTML = rows.map((r) => {
           let status = 'нет связи';
-          if (r.kind === 'local') status = 'этот сервер';
+          if (r.maintenance) status = 'техработы';
+          else if (r.kind === 'local') status = 'этот сервер';
           else if (r.loading) status = 'модель грузится';
           else if (r.ok) status = 'онлайн';
-          const on = r.kind === 'local' ? true : (!!r.ok && !r.loading);
+          const on = r.kind === 'local' ? !r.maintenance : (!!r.ok && !r.loading && !r.maintenance);
           const meters = (r.kind === 'local' || r.ok)
             ? this._loadMeters(r.load)
             : `<div class="load-na">${this._esc(r.error || 'Нет ответа')}</div>`;
-          return `<div class="mem-row ${on ? 'is-on' : 'is-off'}">
+          const target = r.kind === 'local' ? 'local' : r.id;
+          const label = r.maintenance ? 'Завершить техработы' : 'Техработы';
+          const btnClass = r.maintenance ? 'btn btn-danger-ghost btn-sm' : 'btn btn-ghost btn-sm';
+          return `<div class="mem-row ${on ? 'is-on' : 'is-off'}${r.maintenance ? ' is-maint' : ''}">
             <div class="mem-row-head">
               <span class="mem-name">${this._esc(r.name)}</span>
               <span class="mem-status">${status}</span>
             </div>
             ${meters}
+            <button type="button" class="${btnClass} mem-maint-btn" data-maint="${this._esc(target)}" data-on="${r.maintenance ? '1' : '0'}">${label}</button>
           </div>`;
         }).join('');
       }
