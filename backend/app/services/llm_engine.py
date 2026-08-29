@@ -965,7 +965,7 @@ class LLMEngine:
         else:
             raise ValueError(
                 last_err
-                or "На удалённом ПК модель ещё не готова. В окне start.bat дождитесь строки «Готово»."
+                or "На удалённом сервере модель ещё не готова. В окне start.bat дождитесь строки «Готово»."
             )
         cleaned = _cleanup(text)
         last_user = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
@@ -1042,7 +1042,7 @@ def _remote_error_text(response: Optional[httpx.Response]) -> str:
         detail = (response.text or "")[:300]
     if response.status_code == 503:
         return detail or (
-            "На удалённом ПК модель ещё не готова. "
+            "На удалённом сервере модель ещё не готова. "
             "В окне start.bat дождитесь строки «Готово» и напишите ещё раз."
         )
     return detail or f"Ошибка удалённого API: {response.status_code}"

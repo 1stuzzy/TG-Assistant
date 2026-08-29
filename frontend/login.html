@@ -6,7 +6,7 @@
   <title>Вход — TG-Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/styles.css?v=1.4.1">
 </head>
 <body class="login-page">
   <div class="login-card">
@@ -20,7 +20,7 @@
       </div>
     </div>
     <h1>Войти</h1>
-    <p class="login-lead">Администратор выдаёт логин арендатору. Свои Telegram-аккаунты добавляются уже внутри панели.</p>
+    <p class="login-lead">Данные для входа выдает администратор.</p>
     <div class="error-text" id="loginError"></div>
     <form id="loginForm">
       <div class="field">
@@ -34,7 +34,8 @@
       <button class="btn btn-primary" type="submit" id="loginBtn" style="width:100%">Войти</button>
     </form>
   </div>
-  <script src="js/api.js"></script>
+  <div class="toast-wrap" id="toastWrap"></div>
+  <script src="js/api.js?v=1.4.1"></script>
   <script>
     const API_BASE = (location.port === '5500' || location.port === '5501')
       ? 'http://localhost:8000'
@@ -42,10 +43,26 @@
     const api = new ApiClient(API_BASE);
     const err = document.getElementById('loginError');
     const btn = document.getElementById('loginBtn');
+
+    function toast(text) {
+      const wrap = document.getElementById('toastWrap');
+      if (!wrap) return;
+      const el = document.createElement('div');
+      el.className = 'toast err';
+      el.innerHTML = '<span class="tdot"></span>' + text;
+      wrap.appendChild(el);
+      setTimeout(() => {
+        el.style.opacity = '0';
+        el.style.transition = 'opacity .25s';
+        setTimeout(() => el.remove(), 250);
+      }, 4200);
+    }
+
     api.me().then(() => { location.href = '/'; }).catch(() => {});
     document.getElementById('loginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      err.classList.remove('show');
+      err.classList.remove('show', 'warn');
+      err.textContent = '';
       btn.disabled = true;
       try {
         await api.login(
@@ -54,8 +71,11 @@
         );
         location.href = '/';
       } catch (ex) {
-        err.textContent = ex.message;
+        const msg = ex.message || 'Не удалось войти';
+        err.textContent = msg;
         err.classList.add('show');
+        if (/приостановлен/i.test(msg)) err.classList.add('warn');
+        toast(msg);
       } finally {
         btn.disabled = false;
       }

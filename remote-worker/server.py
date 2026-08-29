@@ -27,6 +27,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+try:
+    from host_metrics import collect as collect_load
+except ImportError:
+    collect_load = None
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("worker")
 
@@ -188,13 +193,19 @@ def create_app(
     @app.get("/health")
     async def health(authorization: Optional[str] = Header(default=None)):
         _auth(authorization)
-        return {
+        payload = {
             "ok": llm is not None and not loading,
             "loading": loading,
             "model": loaded_name,
             "device": device_label,
             "error": load_error,
         }
+        if collect_load:
+            try:
+                payload["load"] = await asyncio.to_thread(collect_load)
+            except Exception:
+                pass
+        return payload
 
     @app.get("/v1/models")
     async def models(authorization: Optional[str] = Header(default=None)):

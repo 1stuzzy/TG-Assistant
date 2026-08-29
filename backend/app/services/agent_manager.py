@@ -30,7 +30,7 @@ from app.services.chat_memory import ChatMemory
 from app.services.llm_engine import DEFAULT_PERSONA, LLMEngine, fallback_reply
 from app.services.model_catalog import ModelCatalog
 from app.services.worker_store import WorkerStore
-from app.services.world_context import clock as world_clock
+from app.services.rental_store import effective_folder_title
 
 logger = logging.getLogger(__name__)
 
@@ -141,18 +141,31 @@ class AgentManager:
     def _delays_for(self, account_id: str) -> tuple[int, int]:
         read_ms, reply_ms = 800, 1500
         account = self._store.get(account_id)
+        source = None
+        if account and account.tenant_id and self._rental:
+            source = self._rental.get_tenant(account.tenant_id)
+        elif self._rental:
+            source = self._rental.get_panel_prefs()
+        if source:
+            try:
+                read_ms = int(source.get("read_delay_ms") if source.get("read_delay_ms") is not None else 800)
+            except (TypeError, ValueError):
+                read_ms = 800
+            try:
+                reply_ms = int(source.get("reply_delay_ms") if source.get("reply_delay_ms") is not None else 1500)
+            except (TypeError, ValueError):
+                reply_ms = 1500
+        return max(0, min(read_ms, 60_000)), max(0, min(reply_ms, 60_000))
+
+    def _folder_title_for(self, account_id: str) -> str:
+        account = self._store.get(account_id)
         if account and account.tenant_id and self._rental:
             tenant = self._rental.get_tenant(account.tenant_id)
             if tenant:
-                try:
-                    read_ms = int(tenant.get("read_delay_ms") or 800)
-                except (TypeError, ValueError):
-                    read_ms = 800
-                try:
-                    reply_ms = int(tenant.get("reply_delay_ms") or 1500)
-                except (TypeError, ValueError):
-                    reply_ms = 1500
-        return max(0, min(read_ms, 60_000)), max(0, min(reply_ms, 60_000))
+                return effective_folder_title(tenant.get("folder_title"))
+        if self._rental:
+            return effective_folder_title(self._rental.get_panel_prefs().get("folder_title"))
+        return REPLY_FOLDER_TITLE
 
     async def start(
         self,
@@ -199,6 +212,8 @@ class AgentManager:
             character = self._characters.get(character_id)
             if not character:
                 raise ValueError("Персонаж не найден")
+            if account.tenant_id and (character.get("tenant_id") or "") != account.tenant_id:
+                raise ValueError("Персонаж не найден")
         extra_style = (persona or "").strip()
         if character:
             system_prompt = build_persona(character, extra_style or None)
@@ -221,15 +236,15 @@ class AgentManager:
         worker = None
         if engine == "local":
             if not model_name:
-                raise ValueError("Для запуска на этом ПК выберите GGUF-модель")
+                raise ValueError("Ошибка запуска агента: не установлена модель")
             model_path = self._catalog.resolve(model_name)
             model_label = model_path.name
         else:
             if not worker_id:
-                raise ValueError("Для удалённого запуска выберите компьютер с моделью")
+                raise ValueError("Ошибка запуска агента: не указан удаленный сервер")
             worker = self._workers.get(worker_id)
             if not worker:
-                raise ValueError("Удалённый компьютер не найден — добавьте его в Настройках")
+                raise ValueError("Удалённый сервер не найден")
             await self._workers.wait_ready(worker_id)
             model_label = f"remote:{worker['name']}"
 
@@ -540,7 +555,7 @@ class AgentManager:
             if not tenant or tenant["status"] != "active":
                 return
             if not self._folder_allows(account_id, chat_id):
-                logger.info("Чат %s не в папке «%s» — пропуск", chat_id, REPLY_FOLDER_TITLE)
+                logger.info("Чат %s не в папке «%s» — пропуск", chat_id, self._folder_title_for(account_id))
                 return
             if not self._rental.allow_chat(
                 account.tenant_id,
@@ -894,27 +909,55 @@ class AgentManager:
             return False
         return int(chat_id) in allowed
 
-    def _make_dialog_filter(self, filter_id: int, include_peers: list):
+    def _folder_aliases(self, title: str) -> set[str]:
+        names = {REPLY_FOLDER_TITLE.lower(), "tg-assistant", "ии-агент"}
+        if title:
+            names.add(title.strip().lower())
+        return names
+
+    def _make_dialog_filter(
+        self,
+        filter_id: int,
+        include_peers: list,
+        title: str,
+        pinned_peers: Optional[list] = None,
+        exclude_peers: Optional[list] = None,
+        src=None,
+    ):
         kwargs = dict(
             id=filter_id,
-            title=REPLY_FOLDER_TITLE,
-            pinned_peers=[],
+            title=title,
+            pinned_peers=list(pinned_peers or []),
             include_peers=include_peers,
-            exclude_peers=[],
-            emoticon="💬",
+            exclude_peers=list(exclude_peers or []),
+            emoticon=(getattr(src, "emoticon", None) or "💬"),
         )
+        for key in (
+            "contacts",
+            "non_contacts",
+            "groups",
+            "broadcasts",
+            "bots",
+            "exclude_muted",
+            "exclude_read",
+            "exclude_archived",
+        ):
+            if src is not None and getattr(src, key, None) is not None:
+                kwargs[key] = getattr(src, key)
         try:
             return DialogFilter(**kwargs)
         except TypeError:
             from telethon.tl.types import TextWithEntities
-            kwargs["title"] = TextWithEntities(text=REPLY_FOLDER_TITLE, entities=[])
+            kwargs["title"] = TextWithEntities(text=title, entities=[])
             return DialogFilter(**kwargs)
 
     async def _sync_reply_folder(self, account_id: str, client: TelegramClient) -> None:
         state = self._states.get(account_id)
         limit = self._folder_limit_for(account_id)
+        title = self._folder_title_for(account_id)
+        aliases = self._folder_aliases(title)
         if state:
-            state.folder_title = REPLY_FOLDER_TITLE
+            state.folder_title = title
             state.folder_limit = limit
         try:
             raw = await client(GetDialogFiltersRequest())
@@ -929,13 +972,19 @@ class AgentManager:
 
         found = None
         used_ids: set[int] = set()
+        exact = None
+        alias_hit = None
         for filt in filters:
             fid = getattr(filt, "id", None)
             if isinstance(fid, int):
                 used_ids.add(fid)
-            if _dialog_filter_title(filt).lower() in REPLY_FOLDER_ALIASES:
-                found = filt
+            name = _dialog_filter_title(filt).lower()
+            if name == title.lower():
+                exact = filt
                 break
+            if alias_hit is None and name in aliases:
+                alias_hit = filt
+        found = exact or alias_hit
 
         if found is None:
             new_id = next((i for i in range(2, 256) if i not in used_ids), None)
@@ -943,30 +992,45 @@ class AgentManager:
                 self._folder_ids[account_id] = set()
                 if state:
                     state.folder_hint = (
-                        f"Нет свободного слота папки. Создайте вручную папку «{REPLY_FOLDER_TITLE}»."
+                        f"Нет свободного слота папки. Создайте вручную папку «{title}»."
                     )
                 return
-            created = self._make_dialog_filter(new_id, [InputPeerSelf()])
+            created = self._make_dialog_filter(new_id, [InputPeerSelf()], title)
             try:
                 await client(UpdateDialogFilterRequest(id=new_id, filter=created))
-                logger.info("Создана папка «%s» для account=%s", REPLY_FOLDER_TITLE, account_id)
+                logger.info("Создана папка «%s» для account=%s", title, account_id)
                 raw = await client(GetDialogFiltersRequest())
                 filters = list(getattr(raw, "filters", None) or raw or [])
                 for filt in filters:
-                    if _dialog_filter_title(filt).lower() in REPLY_FOLDER_ALIASES:
+                    if _dialog_filter_title(filt).lower() == title.lower():
                         found = filt
                         break
                 if found is None:
                     found = created
             except Exception as exc:
-                logger.warning("Не удалось создать папку «%s»: %s", REPLY_FOLDER_TITLE, exc)
+                logger.warning("Не удалось создать папку «%s»: %s", title, exc)
                 self._folder_ids[account_id] = set()
                 if state:
                     state.folder_chats = []
                     state.folder_hint = (
-                        f"Создайте в Telegram папку «{REPLY_FOLDER_TITLE}» и перетащите туда личные чаты."
+                        f"Создайте в Telegram папку «{title}» и перетащите туда личные чаты."
                     )
                 return
+        elif _dialog_filter_title(found) != title:
+            try:
+                renamed = self._make_dialog_filter(
+                    int(found.id),
+                    list(getattr(found, "include_peers", None) or []),
+                    title,
+                    pinned_peers=list(getattr(found, "pinned_peers", None) or []),
+                    exclude_peers=list(getattr(found, "exclude_peers", None) or []),
+                    src=found,
+                )
+                await client(UpdateDialogFilterRequest(id=int(found.id), filter=renamed))
+                found = renamed
+                logger.info("Папка переименована в «%s» для account=%s", title, account_id)
+            except Exception:
+                logger.debug("Не удалось переименовать папку в «%s»", title, exc_info=True)
 
         me_id = 0
         try:
@@ -1012,7 +1076,7 @@ class AgentManager:
             state.folder_chats = chats
             if total == 0:
                 state.folder_hint = (
-                    f"Папка «{REPLY_FOLDER_TITLE}» создана. Откройте этот аккаунт в Telegram "
+                    f"Папка «{title}» создана. Откройте этот аккаунт в Telegram "
                     "и перетащите туда личные чаты — бот ответит только им."
                 )
             elif limit and total > limit:

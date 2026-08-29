@@ -5,6 +5,7 @@ __pycache__/
 !.env.example
 data/sessions/
 data/accounts.json
+data/workers.json
 data/chat_memory.json
 data/models/config.json
 data/models/.cache/

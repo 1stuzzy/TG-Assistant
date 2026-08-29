@@ -52,26 +52,62 @@ class WorkerStore:
             items = self._read_unlocked()
             remaining = [w for w in items if w.get("id") != worker_id]
             if len(remaining) == len(items):
-                raise ValueError("Воркер не найден")
+                raise ValueError("Удалённый сервер не найден")
             self._write_unlocked(remaining)
+
+    async def snapshot_all(self, only_ids: Optional[list[str]] = None) -> list[dict]:
+        items = self._read()
+        if only_ids is not None:
+            allowed = set(only_ids)
+            items = [w for w in items if w.get("id") in allowed]
+
+        async def one(w: dict) -> dict:
+            try:
+                st = await ping_url(w["url"], w.get("api_key") or "")
+                return {
+                    "id": w.get("id"),
+                    "name": w.get("name") or "Удалённый сервер",
+                    "url": w.get("url"),
+                    "ok": bool(st.get("ok")),
+                    "loading": bool(st.get("loading")),
+                    "model": st.get("model"),
+                    "device": st.get("device"),
+                    "load": st.get("load"),
+                }
+            except Exception as exc:
+                return {
+                    "id": w.get("id"),
+                    "name": w.get("name") or "Удалённый сервер",
+                    "url": w.get("url"),
+                    "ok": False,
+                    "loading": False,
+                    "model": None,
+                    "device": None,
+                    "load": None,
+                    "error": str(exc)[:160],
+                }
+
+        if not items:
+            return []
+        return list(await asyncio.gather(*[one(w) for w in items]))
 
     async def ping(self, worker_id: str) -> dict:
         worker = self.get(worker_id)
         if not worker:
-            raise ValueError("Воркер не найден")
+            raise ValueError("Удалённый сервер не найден")
         return await ping_url(worker["url"], worker.get("api_key") or "")
 
     async def wait_ready(self, worker_id: str, timeout: float = 600) -> dict:
         worker = self.get(worker_id)
         if not worker:
-            raise ValueError("Воркер не найден")
+            raise ValueError("Удалённый сервер не найден")
         deadline = asyncio.get_running_loop().time() + timeout
         last: dict = {}
         while True:
             last = await ping_url(worker["url"], worker.get("api_key") or "")
             if last.get("error"):
                 raise ValueError(
-                    f"Модель на «{worker.get('name') or 'удалённом ПК'}» не загрузилась: {last['error']}"
+                    f"Модель на «{worker.get('name') or 'удалённом сервере'}» не загрузилась: {last['error']}"
                 )
             if last.get("ok") and not last.get("loading"):
                 return last
@@ -114,6 +150,30 @@ class WorkerStore:
         self._path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _extract_load(data: dict) -> dict | None:
+    load = data.get("load") if isinstance(data, dict) else None
+    if not isinstance(load, dict):
+        return None
+    out: dict = {}
+    for key in (
+        "cpu_percent",
+        "cpu_count",
+        "ram_percent",
+        "ram_used_gb",
+        "ram_total_gb",
+        "disk_percent",
+        "disk_used_gb",
+        "disk_total_gb",
+    ):
+        if key not in load:
+            continue
+        try:
+            out[key] = int(load[key]) if key == "cpu_count" else float(load[key])
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
 def _explain_unreachable(base: str, exc: Exception) -> str:
     text = str(exc)
     return (
@@ -149,10 +209,11 @@ async def ping_url(url: str, api_key: str = "") -> dict:
                             "url": base,
                             "model": data.get("model") or "загружается…",
                             "device": data.get("device"),
+                            "load": _extract_load(data),
                         }
                     err = data.get("error")
                     if isinstance(err, str) and err.strip():
-                        raise ValueError(f"Модель на удалённом ПК не загрузилась: {err}")
+                        raise ValueError(f"Модель на удалённом сервере не загрузилась: {err}")
                     model = data.get("model")
                     if not model:
                         try:
@@ -170,11 +231,19 @@ async def ping_url(url: str, api_key: str = "") -> dict:
                         "url": base,
                         "model": model or "llama-server",
                         "device": data.get("device"),
+                        "load": _extract_load(data),
                     }
                 model = data.get("model")
                 if not model and isinstance(data.get("data"), list) and data["data"]:
                     model = data["data"][0].get("id")
-                return {"ok": True, "loading": False, "url": base, "model": model, "device": data.get("device")}
+                return {
+                    "ok": True,
+                    "loading": False,
+                    "url": base,
+                    "model": model,
+                    "device": data.get("device"),
+                    "load": _extract_load(data),
+                }
             except httpx.ConnectError as exc:
                 last_error = exc
                 break

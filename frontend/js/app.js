@@ -36,15 +36,7 @@ class AgentDialog {
     const engineRow = this.engineLocal && this.engineLocal.closest('.field');
     const isTenant = Boolean(this.quota);
     if (note) {
-      note.hidden = !isTenant;
-      if (isTenant) {
-        const q = this.quota;
-        const bits = [];
-        if (q.engine === 'remote') bits.push('удалённый ПК');
-        else bits.push(q.model_name ? `модель ${q.model_name}` : 'локальная модель');
-        bits.push(`мощность ${q.power || 'medium'}`);
-        note.textContent = 'Администратор назначил: ' + bits.join(' · ');
-      }
+      note.hidden = true;
     }
     if (engineRow) engineRow.style.display = isTenant ? 'none' : '';
     if (this.localFields) this.localFields.style.display = isTenant ? 'none' : (this.engineRemote && this.engineRemote.checked ? 'none' : '');
@@ -77,7 +69,7 @@ class AgentDialog {
       ]);
       this.select.innerHTML = models.length
         ? models.map((m) => `<option value="${m.name}" ${m.is_default ? 'selected' : ''}>${m.name} (${m.size_label})</option>`).join('')
-        : '<option value="">Нет моделей — скачайте во вкладке Настройки</option>';
+        : '<option value="">Нет моделей — загрузите во вкладке Настройки</option>';
       if (this.characterSelect) {
         this.characterSelect.innerHTML = '<option value="">Без персонажа (общий стиль)</option>' +
           characters.map((c) => `<option value="${c.id}">${c.name}${c.age ? ', ' + c.age : ''}${c.city ? ' · ' + c.city : ''}</option>`).join('');
@@ -85,7 +77,7 @@ class AgentDialog {
       if (this.workerSelect) {
         this.workerSelect.innerHTML = workers.length
           ? workers.map((w) => `<option value="${w.id}">${w.name} — ${w.url}</option>`).join('')
-          : '<option value="">Сначала добавьте ПК во вкладке Настройки</option>';
+          : '<option value="">Сначала добавьте удалённый сервер в Настройках</option>';
       }
     } catch (e) {
       this.select.innerHTML = `<option value="">${e.message}</option>`;
@@ -100,12 +92,12 @@ class AgentDialog {
     const remote = this.engineRemote && this.engineRemote.checked;
     const model = this.select ? this.select.value : '';
     if (!this.quota && !remote && !model) {
-      this.err.textContent = 'Сначала скачайте или загрузите GGUF-модель во вкладке «Настройки»';
+      this.err.textContent = 'Сначала загрузите GGUF-модель во вкладке «Настройки»';
       this.err.classList.add('show');
       return;
     }
     if (!this.quota && remote && (!this.workerSelect || !this.workerSelect.value)) {
-      this.err.textContent = 'Выберите удалённый компьютер или добавьте его в Настройках';
+      this.err.textContent = 'Выберите удалённый сервер или добавьте его в Настройках';
       this.err.classList.add('show');
       return;
     }
@@ -117,10 +109,10 @@ class AgentDialog {
         model: this.quota ? null : (remote ? null : model),
         persona: this.persona ? this.persona.value.trim() : '',
         character_id: this.characterSelect && this.characterSelect.value ? this.characterSelect.value : null,
-        engine: this.quota ? (this.quota.engine || 'local') : (remote ? 'remote' : 'local'),
-        worker_id: this.quota ? (this.quota.worker_id || null) : (remote ? this.workerSelect.value : null),
+        engine: this.quota ? 'local' : (remote ? 'remote' : 'local'),
+        worker_id: this.quota ? null : (remote ? this.workerSelect.value : null),
       });
-      this.toast('ok', remote ? 'Агент запущен на удалённом ПК' : 'ИИ-агент запущен на этом ПК');
+      this.toast('ok', remote ? 'Агент запущен на удалённом сервере' : 'ИИ-агент запущен на этом сервере');
       this.close();
       await this.onStarted();
     } catch (e) {
@@ -168,6 +160,10 @@ class App {
         const map = { error: 'err', success: 'ok', info: 'ok' };
         this.toast(map[kind] || 'ok', msg);
       },
+      onQuota: (quota) => {
+        this.quota = quota;
+        this._renderCabinet();
+      },
     });
     this._bindNav();
 
@@ -184,6 +180,11 @@ class App {
         document.querySelectorAll('.settings-content').forEach((el) => el.classList.remove('active'));
         const tab = item.dataset.tab;
         if (tab === 'accounts') document.getElementById('tabAccounts').classList.add('active');
+        if (tab === 'cabinet') {
+          const el = document.getElementById('tabCabinet');
+          if (el) el.classList.add('active');
+          this._renderCabinet();
+        }
         if (tab === 'settings') {
           document.getElementById('tabSettings').classList.add('active');
           this.settings.refresh();
@@ -208,30 +209,55 @@ class App {
     this.settings.role = isAdmin ? 'admin' : 'tenant';
     this.settings.setQuota(isAdmin ? null : me.quota);
     this.agentDialog.setQuota(isAdmin ? null : me.quota);
-    this._renderQuota(isAdmin ? null : me.quota, me.suspended);
+    this._renderCabinet();
     if (!isAdmin) {
       const charTab = document.querySelector('.settings-tab[data-panel="characters"]');
       if (charTab) charTab.click();
     }
   }
 
-  _renderQuota(quota, suspended) {
-    const el = document.getElementById('quotaBanner');
-    if (!el) return;
-    if (!quota) {
-      el.hidden = true;
-      return;
+  _powerLabel(power) {
+    return { low: 'Базовый', medium: 'Стандарт', high: 'Расширенный', custom: 'Персональный' }[power]
+      || 'Персональный';
+  }
+
+  _renderCabinet() {
+    const tab = document.getElementById('tabCabinet');
+    if (!tab) return;
+    const q = this.quota;
+    if (!q) return;
+    const accounts = (this.accountsView && this.accountsView.accounts) || [];
+    const used = this._accountsReady ? accounts.length : (Number(q.accounts_used) || 0);
+    const agents = this._accountsReady
+      ? accounts.filter((a) => a.agent && a.agent.running).length
+      : (Number(q.agents_running) || 0);
+    const maxAccounts = Number(q.max_accounts) || 0;
+    const maxAgents = Number(q.max_agents) || 0;
+    const maxChats = Number(q.max_chats) || 0;
+    const set = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
+    set('cabAccounts', `${used}/${maxAccounts}`);
+    set('cabAgents', `${agents}/${maxAgents}`);
+    set('cabChats', String(maxChats));
+    set('cabPower', this._powerLabel(q.power));
+    set('cabName', q.name || 'Панель');
+    set('cabFolder', (q.folder_title_effective || q.folder_title || 'TG-Assistant'));
+    set('cabLogin', (this.user && this.user.login) || '—');
+    const suspended = q.status && q.status !== 'active';
+    set('cabStatus', suspended ? 'приостановлена' : 'активна');
+    const statusEl = document.getElementById('cabStatus');
+    if (statusEl) statusEl.className = suspended ? 'cab-bad' : 'cab-ok';
+    set('cabMaxAccounts', String(maxAccounts));
+    set('cabMaxAgents', String(maxAgents));
+    set('cabMaxChats', String(maxChats));
+    set('cabReadDelay', `${q.read_delay_ms ?? 800} мс`);
+    set('cabReplyDelay', `${q.reply_delay_ms ?? 1500} мс`);
+    const warn = document.getElementById('cabinetSuspended');
+    if (warn) {
+      warn.hidden = !suspended;
+      warn.innerHTML = suspended
+        ? '<b>Панель приостановлена.</b> Новые аккаунты и агенты недоступны.'
+        : '';
     }
-    el.hidden = false;
-    const power = quota.power || 'medium';
-    el.innerHTML = suspended
-      ? '<b>Панель приостановлена.</b> Новые аккаунты и агенты недоступны.'
-      : `<b>${quota.name || 'Панель'}</b> · аккаунты ${quota.accounts_used}/${quota.max_accounts}` +
-        ` · агенты ${quota.agents_running}/${quota.max_agents}` +
-        ` · до ${quota.max_chats} чатов на аккаунт (папка «TG-Assistant» в Telegram)` +
-        ` · мощность ${power}` +
-        (quota.model_name ? ` · модель ${quota.model_name}` : '') +
-        (quota.engine === 'remote' ? ' · удалённый ПК' : '');
   }
 
   async start() {
@@ -245,6 +271,7 @@ class App {
     }
     this.user = me.user;
     this.quota = me.quota || null;
+    this._accountsReady = false;
     this.applyRole(me);
     if (me.user && me.user.role === 'admin') {
       this.tenants = new TenantsManager({
@@ -261,6 +288,8 @@ class App {
     }
     try {
       await this.accountsView.load();
+      this._accountsReady = true;
+      this._renderCabinet();
     } catch (e) {
       this.toast('err', e.message);
     }
@@ -270,7 +299,11 @@ class App {
       const generating = accounts.some((a) => a.agent && a.agent.status === 'generating');
       const booting = accounts.some((a) => a.agent && a.agent.running && ['starting', 'loading_model', 'connecting'].includes(a.agent.status));
       const running = accounts.some((a) => a.agent && a.agent.running);
-      if (generating || running) this.accountsView.load().catch(() => {});
+      if (generating || running) {
+        this.accountsView.load().then(() => this._renderCabinet()).catch(() => {});
+      } else {
+        this._renderCabinet();
+      }
       setTimeout(poll, generating ? 1500 : booting ? 1000 : running ? 4000 : 8000);
     };
     setTimeout(poll, 4000);

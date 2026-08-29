@@ -1,6 +1,7 @@
 """
 HTTP-слой: аккаунты Telegram, каталог GGUF-моделей и запуск ИИ-агента.
 """
+import asyncio
 import io
 import uuid
 import zipfile
@@ -9,7 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
-from app.auth import admin_user, current_user, require_account, accounts_for
+from app.auth import admin_user, current_user, require_account, accounts_for, require_tenant_writable
 from app.deps import agents, catalog, characters, llm, rental, store, telegram, workers
 from app.models.account import Account
 from app.services.agent_manager import REPLY_FOLDER_TITLE
@@ -20,21 +21,36 @@ from app.schemas import (
     ConfirmCodeResponse,
     ConfirmPasswordRequest,
     DefaultModelRequest,
-    DownloadModelRequest,
     StartLoginRequest,
     StartLoginResponse,
     WorkerPayload,
 )
+from app.services.host_metrics import collect as collect_host
 from app.services.log_hub import log_hub
 
 router = APIRouter(prefix="/api")
 
 
-def _account_out(account: Account) -> dict:
+def _owns_character(character: dict, user: dict) -> bool:
+    if user["role"] == "admin":
+        return True
+    return (character.get("tenant_id") or "") == (user.get("tenant_id") or "")
+
+
+def _hide_model_fields(data: dict) -> dict:
+    out = dict(data)
+    out["model"] = None
+    out["engine"] = None
+    out["worker_name"] = None
+    return out
+
+
+def _account_out(account: Account, hide_model: bool = False) -> dict:
     data = account.to_dict()
     snap = agents.snapshot(account.id)
     data["agent"] = snap
     enabled = bool(account.tenant_id) or bool(snap.get("running"))
+    folder_title = agents._folder_title_for(account.id) if account.id else REPLY_FOLDER_TITLE
     limit = 0
     if account.tenant_id:
         tenant = rental.get_tenant(account.tenant_id)
@@ -46,29 +62,33 @@ def _account_out(account: Account) -> dict:
     limit = snap.get("folder_limit") or limit
     chats = snap.get("folder_chats") or []
     hint = snap.get("folder_hint") or (
-        f"После запуска агента в Telegram появится папка «{REPLY_FOLDER_TITLE}». "
+        f"После запуска агента в Telegram появится папка «{folder_title}». "
         "Перетащите туда личные чаты — бот ответит только им."
         if enabled
         else ""
     )
     data["reply_folder"] = {
-        "title": snap.get("folder_title") or REPLY_FOLDER_TITLE,
+        "title": snap.get("folder_title") or folder_title,
         "enabled": enabled,
         "limit": limit,
         "chats": chats,
         "hint": hint,
     }
+    if hide_model and data.get("agent"):
+        data["agent"] = _hide_model_fields(data["agent"])
     return data
 
 
 @router.get("/accounts")
 async def list_accounts(user: dict = Depends(current_user)):
-    return [_account_out(a) for a in accounts_for(user)]
+    hide = user["role"] != "admin"
+    return [_account_out(a, hide_model=hide) for a in accounts_for(user)]
 
 
 @router.post("/accounts/login/start", response_model=StartLoginResponse)
 async def login_start(payload: StartLoginRequest, user: dict = Depends(current_user)):
     if user["role"] == "tenant":
+        require_tenant_writable(user)
         tenant = user.get("tenant") or {}
         if tenant.get("status") != "active":
             raise HTTPException(status_code=403, detail="Панель приостановлена")
@@ -113,12 +133,12 @@ async def check_account(account_id: str, user: dict = Depends(current_user)):
     require_account(account_id, user)
     if agents.is_running(account_id):
         account = store.get(account_id)
-        return _account_out(account)
+        return _account_out(account, hide_model=user["role"] != "admin")
     try:
         account = await telegram.check_status(account_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    return _account_out(account)
+    return _account_out(account, hide_model=user["role"] != "admin")
 
 
 @router.delete("/accounts/{account_id}")
@@ -136,10 +156,15 @@ async def delete_account(account_id: str, user: dict = Depends(current_user)):
 @router.post("/accounts/{account_id}/agent/start")
 async def start_agent(account_id: str, payload: AgentStartRequest, user: dict = Depends(current_user)):
     require_account(account_id, user)
+    require_tenant_writable(user)
     if user["role"] == "tenant" and (user.get("tenant") or {}).get("status") != "active":
         raise HTTPException(status_code=403, detail="Панель приостановлена")
+    if user["role"] == "tenant" and payload.character_id:
+        character = characters.get(payload.character_id)
+        if not character or not _owns_character(character, user):
+            raise HTTPException(status_code=404, detail="Персонаж не найден")
     try:
-        return await agents.start(
+        snap = await agents.start(
             account_id,
             model_name=(payload.model or "").strip() or None,
             persona=payload.persona,
@@ -153,34 +178,39 @@ async def start_agent(account_id: str, payload: AgentStartRequest, user: dict = 
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+    if user["role"] != "admin":
+        return _hide_model_fields(snap)
+    return snap
 
 
 @router.post("/accounts/{account_id}/agent/stop")
 async def stop_agent(account_id: str, user: dict = Depends(current_user)):
     require_account(account_id, user)
-    return await agents.stop(account_id)
+    snap = await agents.stop(account_id)
+    if user["role"] != "admin":
+        return _hide_model_fields(snap)
+    return snap
 
 
 @router.get("/accounts/{account_id}/agent")
 async def agent_status(account_id: str, user: dict = Depends(current_user)):
     require_account(account_id, user)
-    return agents.snapshot(account_id)
+    snap = agents.snapshot(account_id)
+    if user["role"] != "admin":
+        return _hide_model_fields(snap)
+    return snap
 
 
 @router.get("/models")
 async def list_models(user: dict = Depends(current_user)):
-    items = catalog.list_local()
-    if user["role"] == "admin":
-        return items
-    allowed = ((user.get("tenant") or {}).get("model_name") or "").strip()
-    if not allowed:
-        return items
-    return [m for m in items if m.get("name") == allowed]
+    if user["role"] != "admin":
+        return []
+    return catalog.list_local()
 
 
 @router.get("/models/recommended")
-async def list_recommended(_: dict = Depends(admin_user)):
-    return catalog.recommended()
+async def list_recommended(_: dict = Depends(current_user)):
+    return []
 
 
 @router.post("/models/default")
@@ -219,31 +249,34 @@ async def upload_model(file: UploadFile = File(...), _: dict = Depends(admin_use
     return saved
 
 
-@router.post("/models/download")
-async def download_model(payload: DownloadModelRequest, _: dict = Depends(admin_user)):
-    try:
-        return catalog.start_download(payload.model_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-
-@router.get("/models/download/status")
-async def download_status(_: dict = Depends(admin_user)):
-    return catalog.download_status()
-
-
 @router.get("/system")
 async def system_info(user: dict = Depends(current_user)):
     visible = accounts_for(user)
-    models = catalog.list_local()
     running = sum(1 for a in visible if agents.is_running(a.id))
+    if user["role"] != "admin":
+        return {
+            "app_version": "1.4.5",
+            "api_version": "v1.4",
+            "running_agents": running,
+        }
+    remotes = await workers.snapshot_all(None)
+    local_load = await asyncio.to_thread(collect_host)
     return {
-        "app_version": "1.1.0",
-        "api_version": "v1",
-        "models": len(models),
+        "app_version": "1.4.5",
+        "api_version": "v1.4",
+        "models": len(catalog.list_local()),
         "loaded_model": llm.loaded_name,
         "running_agents": running,
         "models_dir": str(catalog.models_dir),
+        "load": local_load,
+        "memory": {
+            "local": {
+                "name": "Этот сервер",
+                "ok": True,
+                "load": local_load,
+            },
+            "remote": remotes,
+        },
     }
 
 
@@ -253,11 +286,12 @@ async def list_characters(user: dict = Depends(current_user)):
     if user["role"] == "admin":
         return items
     tid = user.get("tenant_id") or ""
-    return [c for c in items if not c.get("tenant_id") or c.get("tenant_id") == tid]
+    return [c for c in items if (c.get("tenant_id") or "") == tid]
 
 
 @router.post("/characters")
 async def create_character(payload: CharacterPayload, user: dict = Depends(current_user)):
+    require_tenant_writable(user)
     data = payload.model_dump()
     if user["role"] == "tenant":
         data["tenant_id"] = user.get("tenant_id") or ""
@@ -272,11 +306,11 @@ async def update_character(character_id: str, payload: CharacterPayload, user: d
     current = characters.get(character_id)
     if not current:
         raise HTTPException(status_code=404, detail="Персонаж не найден")
-    if user["role"] != "admin" and current.get("tenant_id") and current.get("tenant_id") != user.get("tenant_id"):
+    if not _owns_character(current, user):
         raise HTTPException(status_code=404, detail="Персонаж не найден")
     data = payload.model_dump()
     if user["role"] == "tenant":
-        data["tenant_id"] = current.get("tenant_id") or user.get("tenant_id") or ""
+        data["tenant_id"] = user.get("tenant_id") or ""
     try:
         return characters.update(character_id, data)
     except ValueError as exc:
@@ -288,7 +322,7 @@ async def delete_character(character_id: str, user: dict = Depends(current_user)
     current = characters.get(character_id)
     if not current:
         raise HTTPException(status_code=404, detail="Персонаж не найден")
-    if user["role"] != "admin" and current.get("tenant_id") and current.get("tenant_id") != user.get("tenant_id"):
+    if not _owns_character(current, user):
         raise HTTPException(status_code=404, detail="Персонаж не найден")
     try:
         characters.delete(character_id)
@@ -299,13 +333,9 @@ async def delete_character(character_id: str, user: dict = Depends(current_user)
 
 @router.get("/workers")
 async def list_workers(user: dict = Depends(current_user)):
-    items = workers.list()
-    if user["role"] == "admin":
-        return items
-    wid = ((user.get("tenant") or {}).get("worker_id") or "").strip()
-    if not wid:
-        return items
-    return [w for w in items if w.get("id") == wid]
+    if user["role"] != "admin":
+        return []
+    return workers.list()
 
 
 @router.get("/workers/bundle")
@@ -315,7 +345,7 @@ async def worker_bundle(_: dict = Depends(admin_user)):
     names = ("start.bat", "open-firewall.bat", "fetch-runtime.ps1", "run-server.ps1")
     missing = [n for n in names if not (root / n).exists()]
     if missing:
-        raise HTTPException(status_code=500, detail="Пакет воркера не собран")
+        raise HTTPException(status_code=500, detail="Пакет удалённого сервера не собран")
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in names:

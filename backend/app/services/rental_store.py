@@ -20,10 +20,38 @@ POWER_PRESETS = {
     "medium": {"max_accounts": 5, "max_chats": 25, "max_agents": 3},
     "high": {"max_accounts": 15, "max_chats": 80, "max_agents": 8},
 }
+POWER_CUSTOM = "custom"
+
+
+def infer_power(max_accounts, max_chats, max_agents) -> str:
+    try:
+        accounts = int(max_accounts)
+        chats = int(max_chats)
+        agents = int(max_agents)
+    except (TypeError, ValueError):
+        return POWER_CUSTOM
+    for name, preset in POWER_PRESETS.items():
+        if (
+            accounts == preset["max_accounts"]
+            and chats == preset["max_chats"]
+            and agents == preset["max_agents"]
+        ):
+            return name
+    return POWER_CUSTOM
+
+
+def _limit(value, fallback: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(1, n)
 
 DEFAULT_READ_DELAY_MS = 800
 DEFAULT_REPLY_DELAY_MS = 1500
 MAX_DELAY_MS = 60_000
+DEFAULT_FOLDER_TITLE = "TG-Assistant"
+FOLDER_TITLE_MAX = 32
 
 
 def clamp_delay_ms(value, default: int) -> int:
@@ -32,6 +60,14 @@ def clamp_delay_ms(value, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, min(n, MAX_DELAY_MS))
+
+
+def clamp_folder_title(value) -> str:
+    return " ".join(str(value or "").split())[:FOLDER_TITLE_MAX]
+
+
+def effective_folder_title(value) -> str:
+    return clamp_folder_title(value) or DEFAULT_FOLDER_TITLE
 
 PBKDF2_ITERS = 120_000
 TOKEN_DAYS = 14
@@ -115,6 +151,26 @@ class RentalStore:
                 db.execute(
                     "ALTER TABLE tenants ADD COLUMN reply_delay_ms INTEGER NOT NULL DEFAULT 1500"
                 )
+            if "folder_title" not in cols:
+                db.execute(
+                    "ALTER TABLE tenants ADD COLUMN folder_title TEXT NOT NULL DEFAULT ''"
+                )
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS panel_prefs (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    folder_title TEXT NOT NULL DEFAULT '',
+                    read_delay_ms INTEGER NOT NULL DEFAULT 800,
+                    reply_delay_ms INTEGER NOT NULL DEFAULT 1500
+                )
+                """
+            )
+            db.execute("INSERT OR IGNORE INTO panel_prefs (id) VALUES (1)")
+            pref_cols = {row["name"] for row in db.execute("PRAGMA table_info(panel_prefs)").fetchall()}
+            if "maintenance" not in pref_cols:
+                db.execute(
+                    "ALTER TABLE panel_prefs ADD COLUMN maintenance INTEGER NOT NULL DEFAULT 0"
+                )
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS chats (
@@ -140,17 +196,19 @@ class RentalStore:
     def login(self, login: str, password: str) -> Optional[tuple[dict, str]]:
         with self._lock, self._connect() as db:
             row = db.execute("SELECT * FROM users WHERE login=?", (login.strip(),)).fetchone()
-            if not row or not verify_password(password, row["password_hash"]):
-                return None
+            if not row:
+                raise LookupError("Такого логина не существует")
+            if not verify_password(password, row["password_hash"]):
+                raise LookupError("Неверный пароль")
             user = dict(row)
             if user["role"] == "tenant":
                 tenant = db.execute("SELECT * FROM tenants WHERE id=?", (user["tenant_id"],)).fetchone()
                 if not tenant:
-                    return None
+                    raise LookupError("Такого логина не существует")
                 if tenant["status"] == "revoked":
-                    return None
+                    raise PermissionError("Доступ к панели отозван. Обратитесь к администратору.")
                 if tenant["status"] == "suspended":
-                    raise PermissionError("Панель приостановлена")
+                    raise PermissionError("Панель приостановлена. Обратитесь к администратору.")
             token = secrets.token_urlsafe(32)
             expires = (datetime.now(timezone.utc) + timedelta(days=TOKEN_DAYS)).isoformat()
             db.execute(
@@ -195,7 +253,7 @@ class RentalStore:
     def get_tenant(self, tenant_id: str) -> Optional[dict]:
         with self._lock, self._connect() as db:
             row = db.execute("SELECT * FROM tenants WHERE id=?", (tenant_id,)).fetchone()
-            return dict(row) if row else None
+            return self._with_power(dict(row)) if row else None
 
     def list_tenants(self) -> list[dict]:
         with self._lock, self._connect() as db:
@@ -204,7 +262,16 @@ class RentalStore:
         for t in tenants:
             u = users.get(t["id"]) or {}
             t["login"] = u.get("login") or ""
+            self._with_power(t)
         return tenants
+
+    def _with_power(self, tenant: dict) -> dict:
+        tenant["power"] = infer_power(
+            tenant.get("max_accounts"),
+            tenant.get("max_chats"),
+            tenant.get("max_agents"),
+        )
+        return tenant
 
     def create_tenant(self, data: dict) -> dict:
         login = (data.get("login") or "").strip()
@@ -216,10 +283,11 @@ class RentalStore:
             raise ValueError("Укажите логин и пароль арендатора")
         if len(password) < 4:
             raise ValueError("Пароль слишком короткий")
-        power = (data.get("power") or "medium").strip()
-        if power not in POWER_PRESETS:
-            power = "medium"
-        preset = POWER_PRESETS[power]
+        preset = POWER_PRESETS.get((data.get("power") or "").strip()) or POWER_PRESETS["medium"]
+        max_accounts = _limit(data.get("max_accounts"), preset["max_accounts"])
+        max_chats = _limit(data.get("max_chats"), preset["max_chats"])
+        max_agents = _limit(data.get("max_agents"), preset["max_agents"])
+        power = infer_power(max_accounts, max_chats, max_agents)
         tenant_id = str(uuid.uuid4())
         with self._lock, self._connect() as db:
             if db.execute("SELECT 1 FROM users WHERE login=?", (login,)).fetchone():
@@ -235,9 +303,9 @@ class RentalStore:
                     name,
                     "active",
                     power,
-                    int(data.get("max_accounts") or preset["max_accounts"]),
-                    int(data.get("max_chats") or preset["max_chats"]),
-                    int(data.get("max_agents") or preset["max_agents"]),
+                    max_accounts,
+                    max_chats,
+                    max_agents,
                     (data.get("model_name") or "").strip(),
                     (data.get("engine") or "local").strip() or "local",
                     (data.get("worker_id") or "").strip(),
@@ -272,9 +340,21 @@ class RentalStore:
             "note",
             "read_delay_ms",
             "reply_delay_ms",
+            "folder_title",
         }
         if data.get("power") in POWER_PRESETS and not any(k in data for k in ("max_accounts", "max_chats", "max_agents")):
             data = {**POWER_PRESETS[data["power"]], **data}
+        if any(k in data for k in ("power", "max_accounts", "max_chats", "max_agents")):
+            accounts = _limit(data.get("max_accounts"), tenant["max_accounts"])
+            chats = _limit(data.get("max_chats"), tenant["max_chats"])
+            agents = _limit(data.get("max_agents"), tenant["max_agents"])
+            if "max_accounts" in data or data.get("power") in POWER_PRESETS:
+                data["max_accounts"] = accounts
+            if "max_chats" in data or data.get("power") in POWER_PRESETS:
+                data["max_chats"] = chats
+            if "max_agents" in data or data.get("power") in POWER_PRESETS:
+                data["max_agents"] = agents
+            data["power"] = infer_power(accounts, chats, agents)
         if data.get("status") and data["status"] not in {"active", "suspended", "revoked"}:
             raise ValueError("Некорректный статус")
         sets = []
@@ -290,6 +370,8 @@ class RentalStore:
                         val,
                         DEFAULT_READ_DELAY_MS if key == "read_delay_ms" else DEFAULT_REPLY_DELAY_MS,
                     )
+                if key == "folder_title":
+                    val = clamp_folder_title(val)
                 sets[-1] = f"{key}=?"
                 vals.append(val)
         if not sets and not data.get("password") and not data.get("login"):
@@ -340,6 +422,19 @@ class RentalStore:
                 (tenant_id,),
             )
 
+    def delete_tenant(self, tenant_id: str) -> None:
+        tenant = self.get_tenant(tenant_id)
+        if not tenant:
+            raise ValueError("Панель не найдена")
+        with self._lock, self._connect() as db:
+            db.execute(
+                "DELETE FROM tokens WHERE user_id IN (SELECT id FROM users WHERE tenant_id=?)",
+                (tenant_id,),
+            )
+            db.execute("DELETE FROM chats WHERE tenant_id=?", (tenant_id,))
+            db.execute("DELETE FROM users WHERE tenant_id=? AND role='tenant'", (tenant_id,))
+            db.execute("DELETE FROM tenants WHERE id=?", (tenant_id,))
+
     def allow_chat(self, tenant_id: str, account_id: str, chat_id: str, max_chats: int) -> bool:
         if not tenant_id:
             return True
@@ -377,3 +472,68 @@ class RentalStore:
                 "SELECT COUNT(*) AS n FROM chats WHERE tenant_id=?", (tenant_id,)
             ).fetchone()
             return int(row["n"] if row else 0)
+
+    def get_panel_prefs(self) -> dict:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT * FROM panel_prefs WHERE id=1").fetchone()
+        if not row:
+            return {
+                "folder_title": "",
+                "read_delay_ms": DEFAULT_READ_DELAY_MS,
+                "reply_delay_ms": DEFAULT_REPLY_DELAY_MS,
+                "maintenance": 0,
+            }
+        data = dict(row)
+        data["maintenance"] = int(data.get("maintenance") or 0)
+        return data
+
+    def is_maintenance(self) -> bool:
+        return bool(self.get_panel_prefs().get("maintenance"))
+
+    def set_maintenance(self, enabled: bool) -> dict:
+        return self.update_panel_prefs({"maintenance": 1 if enabled else 0})
+
+    def update_panel_prefs(self, data: dict) -> dict:
+        current = self.get_panel_prefs()
+        folder = current.get("folder_title") or ""
+        if "folder_title" in data and data["folder_title"] is not None:
+            folder = clamp_folder_title(data["folder_title"])
+        read_ms = current.get("read_delay_ms", DEFAULT_READ_DELAY_MS)
+        reply_ms = current.get("reply_delay_ms", DEFAULT_REPLY_DELAY_MS)
+        if "read_delay_ms" in data and data["read_delay_ms"] is not None:
+            read_ms = clamp_delay_ms(data["read_delay_ms"], DEFAULT_READ_DELAY_MS)
+        if "reply_delay_ms" in data and data["reply_delay_ms"] is not None:
+            reply_ms = clamp_delay_ms(data["reply_delay_ms"], DEFAULT_REPLY_DELAY_MS)
+        maint = int(bool(current.get("maintenance")))
+        if "maintenance" in data and data["maintenance"] is not None:
+            maint = 1 if data["maintenance"] else 0
+        with self._lock, self._connect() as db:
+            db.execute(
+                """INSERT INTO panel_prefs (id, folder_title, read_delay_ms, reply_delay_ms, maintenance)
+                   VALUES (1,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     folder_title=excluded.folder_title,
+                     read_delay_ms=excluded.read_delay_ms,
+                     reply_delay_ms=excluded.reply_delay_ms,
+                     maintenance=excluded.maintenance""",
+                (folder, read_ms, reply_ms, maint),
+            )
+        return self.get_panel_prefs()
+
+    def telegram_prefs(self, source: dict) -> dict:
+        stored = clamp_folder_title(source.get("folder_title"))
+        try:
+            read_ms = int(source.get("read_delay_ms"))
+        except (TypeError, ValueError):
+            read_ms = DEFAULT_READ_DELAY_MS
+        try:
+            reply_ms = int(source.get("reply_delay_ms"))
+        except (TypeError, ValueError):
+            reply_ms = DEFAULT_REPLY_DELAY_MS
+        return {
+            "folder_title": stored,
+            "folder_title_effective": effective_folder_title(stored),
+            "folder_title_default": DEFAULT_FOLDER_TITLE,
+            "read_delay_ms": read_ms,
+            "reply_delay_ms": reply_ms,
+        }

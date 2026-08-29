@@ -36,7 +36,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="TG-Assistant",
     description="Управление аккаунтами и ИИ-агентами Telegram",
-    version="1.1.0",
+    version="1.4.5",
     lifespan=lifespan,
 )
 

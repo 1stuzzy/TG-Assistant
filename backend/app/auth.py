@@ -3,6 +3,8 @@ from fastapi import Depends, HTTPException, Request
 
 from app.deps import rental, store
 
+MAINTENANCE_DETAIL = "Технические работы. Добавление и запуск временно недоступны."
+
 
 def current_user(request: Request) -> dict:
     user = getattr(request.state, "user", None) or rental.user_from_request(request)
@@ -22,6 +24,13 @@ def admin_user(user: dict = Depends(current_user)) -> dict:
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Только администратор")
     return user
+
+
+def require_tenant_writable(user: dict) -> None:
+    if user.get("role") != "tenant":
+        return
+    if rental.is_maintenance():
+        raise HTTPException(status_code=503, detail=MAINTENANCE_DETAIL)
 
 
 def require_account(account_id: str, user: dict):

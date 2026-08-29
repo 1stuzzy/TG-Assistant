@@ -63,6 +63,14 @@ class ApiClient {
     return this._request('/api/me/delays', { method: 'PATCH', body: JSON.stringify(data) });
   }
 
+  myTelegram() {
+    return this._request('/api/me/telegram');
+  }
+
+  updateMyTelegram(data) {
+    return this._request('/api/me/telegram', { method: 'PATCH', body: JSON.stringify(data) });
+  }
+
   listTenants() {
     return this._request('/api/admin/tenants');
   }
@@ -80,6 +88,10 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ granted }),
     });
+  }
+
+  deleteTenant(id) {
+    return this._request(`/api/admin/tenants/${id}`, { method: 'DELETE' });
   }
 
   aiOptions() {
@@ -123,10 +135,6 @@ class ApiClient {
     return this._request('/api/models');
   }
 
-  listRecommendedModels() {
-    return this._request('/api/models/recommended');
-  }
-
   setDefaultModel(name) {
     return this._request('/api/models/default', {
       method: 'POST',
@@ -140,17 +148,6 @@ class ApiClient {
 
   deleteModel(name) {
     return this._request(`/api/models/${encodeURIComponent(name)}`, { method: 'DELETE' });
-  }
-
-  downloadModel(modelId) {
-    return this._request('/api/models/download', {
-      method: 'POST',
-      body: JSON.stringify({ model_id: modelId }),
-    });
-  }
-
-  downloadStatus() {
-    return this._request('/api/models/download/status');
   }
 
   systemInfo() {

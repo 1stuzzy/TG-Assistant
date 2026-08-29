@@ -2,9 +2,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from app.auth import admin_user, current_user
-from app.deps import agents, catalog, rental, store, workers
-from app.schemas import LoginRequest, TenantPayload
-from app.services.rental_store import COOKIE, POWER_PRESETS
+from app.deps import agents, catalog, rental, store, telegram, workers
+from app.schemas import LoginRequest, TenantPayload, TelegramPrefsPayload
+from app.services.rental_store import COOKIE, POWER_PRESETS, effective_folder_title
 
 router = APIRouter(prefix="/api")
 
@@ -27,12 +27,23 @@ def _quota(tenant: dict) -> dict:
     }
 
 
+def _tenant_cabinet(tenant: dict) -> dict:
+    """Лимиты панели без имени модели, движка и воркера."""
+    q = _quota(tenant)
+    for key in ("model_name", "engine", "worker_id", "note", "power_presets"):
+        q.pop(key, None)
+    q["folder_title_effective"] = effective_folder_title(q.get("folder_title"))
+    return q
+
+
 @router.post("/auth/login")
 def login(payload: LoginRequest, response: Response):
     try:
         result = rental.login(payload.login.strip(), payload.password)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
     if not result:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
     user, token = result
@@ -58,8 +69,9 @@ def logout(request: Request, response: Response):
 @router.get("/auth/me")
 def me(user: dict = Depends(current_user)):
     data = {"user": {k: user[k] for k in ("id", "login", "role", "tenant_id")}}
+    data["maintenance"] = rental.is_maintenance()
     if user["role"] == "tenant" and user.get("tenant"):
-        data["quota"] = _quota(user["tenant"])
+        data["quota"] = _tenant_cabinet(user["tenant"])
         data["suspended"] = user["tenant"]["status"] != "active"
     return data
 
@@ -107,21 +119,65 @@ async def admin_set_access(tenant_id: str, payload: dict, _: dict = Depends(admi
     return _quota(tenant)
 
 
-@router.patch("/me/delays")
-def update_my_delays(payload: TenantPayload, user: dict = Depends(current_user)):
-    if user["role"] != "tenant":
-        raise HTTPException(status_code=403, detail="Только арендатор меняет задержки своей панели")
-    if user.get("tenant_suspended") or (user.get("tenant") or {}).get("status") != "active":
-        raise HTTPException(status_code=403, detail="Панель приостановлена")
-    data = payload.model_dump(exclude_unset=True)
-    allowed = {k: data[k] for k in ("read_delay_ms", "reply_delay_ms") if k in data}
-    if not allowed:
-        raise HTTPException(status_code=400, detail="Укажите задержку в миллисекундах")
+@router.delete("/admin/tenants/{tenant_id}")
+async def admin_delete_tenant(tenant_id: str, _: dict = Depends(admin_user)):
+    tenant = rental.get_tenant(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Панель не найдена")
+    rental.drop_tenant_tokens(tenant_id)
+    await _stop_tenant_agents(tenant_id)
+    for acc in store.list_by_tenant(tenant_id):
+        try:
+            await telegram.delete_account(acc.id)
+        except Exception:
+            store.delete(acc.id)
     try:
-        tenant = rental.update_tenant(user["tenant_id"], allowed)
+        rental.delete_tenant(tenant_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return _quota(tenant)
+    return {"ok": True}
+
+
+@router.get("/me/telegram")
+def my_telegram(user: dict = Depends(current_user)):
+    if user["role"] == "tenant" and user.get("tenant"):
+        return rental.telegram_prefs(user["tenant"])
+    return rental.telegram_prefs(rental.get_panel_prefs())
+
+
+@router.patch("/me/telegram")
+def update_my_telegram(payload: TelegramPrefsPayload, user: dict = Depends(current_user)):
+    data = payload.model_dump(exclude_unset=True)
+    allowed = {k: data[k] for k in ("folder_title", "read_delay_ms", "reply_delay_ms") if k in data}
+    if not allowed:
+        raise HTTPException(status_code=400, detail="Укажите название папки или задержку")
+    if user["role"] == "tenant":
+        if user.get("tenant_suspended") or (user.get("tenant") or {}).get("status") != "active":
+            raise HTTPException(status_code=403, detail="Панель приостановлена")
+        from app.auth import require_tenant_writable
+        require_tenant_writable(user)
+        try:
+            tenant = rental.update_tenant(user["tenant_id"], allowed)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return rental.telegram_prefs(tenant)
+    prefs = rental.update_panel_prefs(allowed)
+    return rental.telegram_prefs(prefs)
+
+
+@router.patch("/me/delays")
+def update_my_delays(payload: TenantPayload, user: dict = Depends(current_user)):
+    data = payload.model_dump(exclude_unset=True)
+    return update_my_telegram(TelegramPrefsPayload(**{
+        k: data[k] for k in ("read_delay_ms", "reply_delay_ms", "folder_title") if k in data
+    }), user)
+
+
+@router.post("/admin/maintenance")
+def admin_set_maintenance(payload: dict, _: dict = Depends(admin_user)):
+    enabled = bool(payload.get("enabled"))
+    rental.set_maintenance(enabled)
+    return {"maintenance": rental.is_maintenance()}
 
 
 @router.get("/admin/ai-options")

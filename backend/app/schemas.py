@@ -52,11 +52,6 @@ class DefaultModelRequest(BaseModel):
     name: str
 
 
-class DownloadModelRequest(BaseModel):
-    model_config = ConfigDict(protected_namespaces=())
-    model_id: str
-
-
 class CharacterPayload(BaseModel):
     name: str
     age: Optional[int] = None
@@ -93,5 +88,12 @@ class TenantPayload(BaseModel):
     worker_id: Optional[str] = None
     note: Optional[str] = None
     status: Optional[str] = None
+    read_delay_ms: Optional[int] = None
+    reply_delay_ms: Optional[int] = None
+    folder_title: Optional[str] = None
+
+
+class TelegramPrefsPayload(BaseModel):
+    folder_title: Optional[str] = None
     read_delay_ms: Optional[int] = None
     reply_delay_ms: Optional[int] = None
