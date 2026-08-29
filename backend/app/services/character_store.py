@@ -2,14 +2,29 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from pathlib import Path
 from typing import Optional
 
 GIRL_STYLE_PROMPT = (
-    "Пиши как живая девушка в личке: коротко, тепло, можно «хаха»/«ща». "
-    "Не бот и не ассистент. Без списков и «чем могу помочь»."
+    "Пиши как живая девушка в личке: коротко, тепло, можно «хаха». "
+    "Не бот, не ассистент и не языковая модель. Без списков и «чем могу помочь». "
+    "Про себя — только то, что есть в этой карточке, без новой биографии."
+)
+
+BOY_STYLE_PROMPT = (
+    "Пиши как живой парень в личке: коротко, можно «хаха». "
+    "Не бот, не ассистент и не языковая модель. Без списков. "
+    "Про себя — только то, что есть в этой карточке, без новой биографии."
+)
+
+_FEMALE_GENDERS = {"female", "girl", "ж", "девушка", "жен", "f"}
+_MALE_GENDERS = {"male", "boy", "м", "парень", "муж", "m"}
+_NAME_IN_PERSONA = re.compile(r"(?i)тебя зовут\s+([A-Za-zА-ЯЁа-яё]+)")
+_CITY_IN_PERSONA = re.compile(
+    r"(?i)жив[её]шь в\s+([A-Za-zА-ЯЁа-яё\-]+)"
 )
 
 DEFAULT_CHARACTERS = [
@@ -31,16 +46,68 @@ DEFAULT_CHARACTERS = [
 ]
 
 
+def first_name(character: dict) -> str:
+    return ((character.get("name") or "").strip().split() or ["я"])[0]
+
+
+def is_female(gender: Optional[str]) -> bool:
+    return (gender or "female").strip().lower() in _FEMALE_GENDERS
+
+
+def is_male(gender: Optional[str]) -> bool:
+    return (gender or "").strip().lower() in _MALE_GENDERS
+
+
+def identity_block(character: dict) -> str:
+    name = first_name(character)
+    gender = (character.get("gender") or "female").lower()
+    city = (character.get("city") or "").strip()
+    age = character.get("age")
+    age_bit = f" Тебе {age}." if age else ""
+    city_bit = f" Живёшь в {city}." if city else ""
+    if is_female(gender):
+        return (
+            f"Ты девушка, тебя зовут {name}.{age_bit}{city_bit} "
+            "О себе только женский род: рада, пошла, устала, познакомилась. "
+            "Нельзя: рад, готов, пошёл, устал, я парень, языковая модель, Google, Gemma."
+        )
+    if is_male(gender):
+        return (
+            f"Ты парень, тебя зовут {name}.{age_bit}{city_bit} "
+            "О себе только мужской род: рад, пошёл, устал. "
+            "Нельзя: рада, пошла, устала, я девушка, языковая модель, Google, Gemma."
+        )
+    return f"Тебя зовут {name}.{age_bit}{city_bit} Не языковая модель."
+
+
+def voice_from_persona(persona: Optional[str]) -> tuple[str, str, str]:
+    text = persona or ""
+    name_m = _NAME_IN_PERSONA.search(text)
+    city_m = _CITY_IN_PERSONA.search(text)
+    name = name_m.group(1) if name_m else ""
+    city = city_m.group(1) if city_m else ""
+    low = text.lower()
+    if "ты девушка" in low or "женский род" in low:
+        gender = "female"
+    elif "ты парень" in low or "мужской род" in low:
+        gender = "male"
+    else:
+        gender = "female"
+    return name, gender, city
+
+
 def build_persona(character: dict, extra: Optional[str] = None) -> str:
     gender = (character.get("gender") or "female").lower()
-    name = character.get("name") or "человек"
-    age = character.get("age")
-    city = character.get("city") or ""
-    who = name + (f", {age}" if age else "") + (f", {city}" if city else "")
-    if gender in {"female", "girl", "ж", "девушка"}:
-        bits = [f"Ты {who}. {GIRL_STYLE_PROMPT}"]
+    bits = [identity_block(character)]
+    if is_female(gender):
+        bits.append(GIRL_STYLE_PROMPT)
+    elif is_male(gender):
+        bits.append(BOY_STYLE_PROMPT)
     else:
-        bits = [f"Ты {who}. Пиши коротко, как живой человек в личке, не бот."]
+        bits.append(
+            "Пиши коротко, как живой человек в личке, не бот. "
+            "Про себя — только то, что есть в этой карточке, без новой биографии."
+        )
     detail = " ".join(
         x.strip()
         for x in (character.get("occupation"), character.get("hobbies"), character.get("bio"))
@@ -50,7 +117,7 @@ def build_persona(character: dict, extra: Optional[str] = None) -> str:
         bits.append("О себе (не рассказывай списком, только если спросят): " + detail[:280])
     extra_bits = " ".join(x for x in (character.get("extra"), extra) if x and str(x).strip())
     if extra_bits:
-        bits.append("Стиль: " + extra_bits.strip()[:400])
+        bits.append("Стиль: " + extra_bits.strip()[:220])
     return " ".join(bits)
 
 

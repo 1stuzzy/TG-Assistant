@@ -19,7 +19,7 @@
     </div>
     <div>
       <div class="brand-name">TG-Assistant</div>
-      <div class="brand-sub">administration console</div>
+      <div class="brand-sub">панель</div>
     </div>
   </div>
 
@@ -46,8 +46,8 @@
       <span id="userLogin">—</span>
       <button class="btn btn-ghost btn-sm" id="logoutBtn" type="button">Выйти</button>
     </div>
-    <b>Локальный ИИ</b><br>GGUF-модели из папки data/models, работа на CPU.
-    <div class="api-status" id="apiStatus"><span class="dot"></span><span>Проверка backend…</span></div>
+    <p class="sidebar-note">Локальный ИИ · GGUF из data/models</p>
+    <div class="api-status" id="apiStatus"><span class="dot"></span><span>Проверка…</span></div>
   </div>
 </aside>
 
@@ -59,12 +59,12 @@
     <div class="topbar">
       <div class="title-block">
         <h1>Аккаунты</h1>
-        <p>Список подключённых Telegram-аккаунтов и их состояние</p>
+        <p>Подключённые Telegram и состояние агентов</p>
       </div>
       <div class="topbar-actions">
         <div class="search">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          <input id="searchInput" placeholder="Поиск по номеру или имени">
+          <input id="searchInput" placeholder="Номер или имя">
         </div>
         <button class="btn btn-primary" id="addAccountBtn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 5v14M5 12h14"/></svg>
@@ -156,12 +156,12 @@
     <div class="settings-panel" id="panelCharacters">
       <div class="settings-card">
         <h3>Новый персонаж</h3>
-        <p class="desc">Имя, возраст, город и хобби. При запуске агента выберите карточку — модель будет отвечать от этого лица.</p>
+        <p class="desc">Имя, возраст и город (по городу берётся часовой пояс). Выберите карточку при запуске агента.</p>
         <form id="characterForm">
           <div class="settings-grid">
             <div class="field"><label>Имя</label><input class="text-input" id="charName" required placeholder="Милана"></div>
             <div class="field"><label>Возраст</label><input class="text-input" id="charAge" type="number" min="18" placeholder="23"></div>
-            <div class="field"><label>Город</label><input class="text-input" id="charCity" placeholder="Москва"></div>
+            <div class="field"><label>Город</label><input class="text-input" id="charCity" placeholder="Уфа"></div>
             <div class="field">
               <label>Кто это</label>
               <select class="text-input" id="charGender">
@@ -195,7 +195,7 @@
           </div>
           <div class="step">
             <i>2</i>
-            <div>Положите модель рядом, назовите <b>model.gguf</b> и запустите start.bat.<span>Окно не закрывайте. На том ПК запустите open-firewall.bat от администратора — нужен входящий TCP 8088, не исходящий.</span></div>
+            <div>Положите модель рядом, назовите <b>model.gguf</b> и запустите start.bat.<span>В консоли выберите 1 CPU, 2 GPU или 3 CPU+GPU. Окно не закрывайте. Порт 8088 — входящий, open-firewall.bat от администратора.</span></div>
           </div>
           <div class="step">
             <i>3</i>

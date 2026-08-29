@@ -26,7 +26,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-server.ps1" "%MODEL%"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-server.ps1" "%MODEL%" "%~2"
 echo.
 echo ----------------------------------------
 pause

@@ -213,6 +213,14 @@ def create_app(
             )
         messages = [{"role": m.role, "content": m.content} for m in payload.messages]
         log.info("Генерация, сообщений: %s stream=%s", len(messages), payload.stream)
+        for name in ("reset", "reset_chat"):
+            fn = getattr(llm, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                    break
+                except Exception:
+                    log.debug("Сброс контекста (%s) не удался", name, exc_info=True)
 
         def _kwargs():
             return dict(

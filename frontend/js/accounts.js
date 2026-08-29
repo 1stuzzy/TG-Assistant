@@ -3,7 +3,7 @@
  * поиск и действия «Проверить» / «Удалить».
  */
 class AccountsView {
-  static COLORS = ['#2FA6E0', '#45B26B', '#D9A441', '#B26FD9', '#DB5C5C', '#4FC3C0'];
+  static COLORS = ['#5aaec6', '#5aad78', '#c9a45a', '#8b7cc9', '#d07070', '#5ab8a8'];
 
   constructor({ api, gridEl, searchEl, statTotalEl, statActiveEl, statInactiveEl, statAgentsEl, toast, onStartAgent }) {
     this.api = api;

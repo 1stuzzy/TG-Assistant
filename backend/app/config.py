@@ -43,6 +43,10 @@ class Settings:
             data_root / "models",
         )
         self.models_config_file: Path = self.models_dir / "config.json"
+        self.conversation_pack_dir: Path = _resolve_data_dir(
+            os.getenv("CONVERSATION_PACK_DIR"),
+            data_root / "rules",
+        )
         store_root = self.accounts_file.parent
         self.characters_file: Path = Path(
             os.getenv("CHARACTERS_FILE", str(store_root / "characters.json"))
@@ -58,7 +62,21 @@ class Settings:
         self.llm_n_ctx: int = int(os.getenv("LLM_N_CTX", "2048"))
         self.llm_n_threads: int = int(os.getenv("LLM_N_THREADS", "0"))
         self.llm_n_gpu_layers: int = int(os.getenv("LLM_N_GPU_LAYERS", "0"))
-        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "64"))
+        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "96"))
+        self.world_timezone: str = os.getenv("WORLD_TIMEZONE", "Europe/Moscow")
+        self.world_news: bool = os.getenv("WORLD_NEWS", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        self.world_weather: bool = os.getenv("WORLD_WEATHER", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        self.world_news_ttl: int = int(os.getenv("WORLD_NEWS_TTL", "1200"))
 
         cors_raw = os.getenv(
             "CORS_ORIGINS",

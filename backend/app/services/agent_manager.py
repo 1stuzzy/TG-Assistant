@@ -25,10 +25,12 @@ from telethon.tl.types import DialogFilter, InputPeerSelf, ReactionEmoji, User
 
 from app.config import settings
 from app.services.account_store import AccountStore
-from app.services.character_store import CharacterStore, build_persona
-from app.services.llm_engine import DEFAULT_PERSONA, HUMAN_FALLBACKS, LLMEngine
+from app.services.character_store import CharacterStore, build_persona, first_name
+from app.services.chat_memory import ChatMemory
+from app.services.llm_engine import DEFAULT_PERSONA, LLMEngine, fallback_reply
 from app.services.model_catalog import ModelCatalog
 from app.services.worker_store import WorkerStore
+from app.services.world_context import clock as world_clock
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +39,10 @@ POLL_EVERY_SEC = 5
 DIALOG_SCAN_LIMIT = 25
 RECENT_INCOMING_MINUTES = 15
 REPLY_FOLDER_TITLE = "TG-Assistant"
-HISTORY_FETCH = 50
+HISTORY_FETCH = 300
 HISTORY_CHAR_BUDGET = 2400
-BURST_QUIET_SEC = 3.5
-BURST_MAX_SEC = 12.0
+BURST_QUIET_SEC = 4.5
+BURST_MAX_SEC = 18.0
 VOICE_REPLIES = (
     "напиши текстом, я без наушников",
     "голосовые ща не слушаю, кинь письменно)",
@@ -57,6 +59,8 @@ class AgentState:
     model: Optional[str] = None
     persona: Optional[str] = None
     character_name: Optional[str] = None
+    character_city: Optional[str] = None
+    character_gender: Optional[str] = None
     engine: str = "local"
     worker_name: Optional[str] = None
     replies: int = 0
@@ -113,6 +117,7 @@ class AgentManager:
         self._characters = characters
         self._workers = workers
         self._rental = rental
+        self._memory = ChatMemory(settings.accounts_file.parent / "chat_memory.json")
         self._states: dict[str, AgentState] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._stops: dict[str, asyncio.Event] = {}
@@ -234,6 +239,8 @@ class AgentManager:
             model=model_label,
             persona=system_prompt,
             character_name=character["name"] if character else None,
+            character_city=(character.get("city") or "").strip() or None if character else None,
+            character_gender=(character.get("gender") or "").strip() or None if character else None,
             engine=engine,
             worker_name=worker["name"] if worker else None,
         )
@@ -254,6 +261,20 @@ class AgentManager:
             model_label,
             state.character_name or "—",
         )
+        try:
+            clk = world_clock(state.character_city)
+            logger.info(
+                "Мир агента персонаж=%s gender=%s city=%s tz=%s сейчас=%s %s %s",
+                state.character_name or "—",
+                state.character_gender or "—",
+                clk.city or "—",
+                clk.zone,
+                clk.weekday,
+                clk.time_line,
+                clk.part,
+            )
+        except Exception:
+            logger.debug("Часы персонажа недоступны", exc_info=True)
         self._tasks[account_id] = asyncio.create_task(
             self._run(account_id, model_path, system_prompt)
         )
@@ -415,11 +436,12 @@ class AgentManager:
         chat_id = event.chat_id
         token = object()
         self._latest.setdefault(account_id, {})[chat_id] = (token, event)
-        await asyncio.sleep(BURST_QUIET_SEC)
+        await asyncio.sleep(1.0)
         current = self._latest.get(account_id, {}).get(chat_id)
         if not current or current[0] is not token:
             return
-        await self._reply(account_id, client, event.message, persona, chat_id)
+        latest_event = current[1]
+        await self._reply(account_id, client, latest_event.message, persona, chat_id)
 
     async def _poll_inbox(
         self,
@@ -463,13 +485,21 @@ class AgentManager:
                 entity = dialog.entity
                 if not self._should_reply(entity):
                     continue
-                messages = await client.get_messages(entity, limit=1)
+                messages = await client.get_messages(entity, limit=8)
                 if not messages:
                     continue
-                last = messages[0]
-                if last.out:
+                incoming = [
+                    m
+                    for m in messages
+                    if m
+                    and not getattr(m, "out", False)
+                    and self._message_text(m)
+                ]
+                if not incoming:
                     continue
-                if not self._message_text(last):
+                last = max(incoming, key=lambda m: int(m.id))
+                already = self._replied.get(account_id, {}).get(dialog.id, 0)
+                if int(last.id) <= int(already or 0):
                     continue
                 msg_date = last.date
                 if msg_date.tzinfo is None:
@@ -527,8 +557,6 @@ class AgentManager:
         async with lock:
             already = self._replied.setdefault(account_id, {})
             inflight = self._inflight.setdefault(account_id, set())
-            if chat_id in inflight:
-                return
             latest_id = await self._wait_for_burst(client, chat_id, message.id)
             if already.get(chat_id, 0) >= latest_id:
                 return
@@ -571,16 +599,20 @@ class AgentManager:
         try:
             remote = self._remote.get(account_id)
             reply = ""
-            for attempt in range(2):
+            peer = await self._peer_label(client, chat_id)
+            for attempt in range(5):
                 extra_wait = await self._wait_for_burst(client, chat_id, msg_id)
                 msg_id = max(msg_id, extra_wait)
                 history, last_in_id = await self._history(client, chat_id)
                 if last_in_id:
                     msg_id = max(msg_id, last_in_id)
+                memory = self._memory.remember(account_id, chat_id, history, peer)
                 logger.info(
-                    "Генерация chat=%s, реплик в контексте=%s, попытка=%s",
+                    "Генерация chat=%s peer=%s реплик=%s память=%s попытка=%s",
                     chat_id,
+                    (peer or "—")[:40],
                     len(history),
+                    len(memory),
                     attempt + 1,
                 )
 
@@ -591,21 +623,33 @@ class AgentManager:
                 if voice_reply:
                     reply = voice_reply
                 else:
+                    account_persona = (state.persona or persona or DEFAULT_PERSONA)
+                    who = first_name({"name": state.character_name}) if state.character_name else None
                     reply = await self._llm.generate(
                         history,
-                        persona or DEFAULT_PERSONA,
+                        account_persona,
                         remote_url=remote[0] if remote else None,
                         remote_key=remote[1] if remote else None,
                         on_partial=on_partial,
+                        peer=peer,
+                        memory=memory,
+                        city=state.character_city,
+                        name=who,
+                        gender=state.character_gender,
                     )
-                _, newer_id = await self._history(client, chat_id)
+                newer_id = await self._latest_incoming_id(client, chat_id)
                 if newer_id <= msg_id:
                     break
                 msg_id = newer_id
                 logger.info("Пока писали, пришли новые сообщения chat=%s — пересобираю ответ", chat_id)
             state.typing_text = reply
             if not (reply or "").strip():
-                reply = random.choice(HUMAN_FALLBACKS)
+                last_text = next(
+                    (m.get("content") or "" for m in reversed(history) if m.get("role") == "user"),
+                    "",
+                )
+                who = first_name({"name": state.character_name}) if state.character_name else None
+                reply = fallback_reply(last_text, who, state.character_gender, state.character_city)
             await asyncio.sleep(min(0.25 + len(reply) * 0.012, 0.9))
             await client.send_message(chat_id, reply)
             self._replied.setdefault(account_id, {})[chat_id] = msg_id
@@ -654,8 +698,9 @@ class AgentManager:
         latest = known_id
         deadline = time.monotonic() + BURST_MAX_SEC
         while time.monotonic() < deadline:
+            await asyncio.sleep(BURST_QUIET_SEC)
             try:
-                messages = await client.get_messages(chat_id, limit=12)
+                messages = await client.get_messages(chat_id, limit=16)
             except Exception:
                 break
             incoming = [
@@ -669,12 +714,19 @@ class AgentManager:
             if newest <= latest:
                 break
             latest = newest
-            await asyncio.sleep(BURST_QUIET_SEC)
         return latest
 
-    def _history_budget(self) -> int:
-        ctx = int(getattr(settings, "llm_n_ctx", 2048) or 2048)
-        return max(400, min(1200, int(ctx * 0.9) - 700))
+    async def _latest_incoming_id(self, client: TelegramClient, chat_id: int) -> int:
+        try:
+            messages = await client.get_messages(chat_id, limit=12)
+        except Exception:
+            return 0
+        last_in_id = 0
+        for msg in messages or []:
+            if getattr(msg, "out", False) or not self._message_text(msg):
+                continue
+            last_in_id = max(last_in_id, int(getattr(msg, "id", 0) or 0))
+        return last_in_id
 
     async def _history(self, client: TelegramClient, chat_id: int) -> tuple[list[dict], int]:
         messages = await client.get_messages(chat_id, limit=HISTORY_FETCH)
@@ -691,17 +743,23 @@ class AgentManager:
                 history[-1]["content"] = (history[-1]["content"] + "\n" + text).strip()
             else:
                 history.append({"role": role, "content": text})
-        budget = self._history_budget()
-        trimmed: list[dict] = []
-        used = 0
-        for item in reversed(history):
-            n = len(item["content"])
-            if trimmed and used + n > budget:
-                break
-            trimmed.append(item)
-            used += n
-        trimmed.reverse()
-        return trimmed, last_in_id
+        return history, last_in_id
+
+    @staticmethod
+    async def _peer_label(client: TelegramClient, chat_id: int) -> str:
+        try:
+            entity = await client.get_entity(chat_id)
+        except Exception:
+            return ""
+        name = " ".join(
+            part
+            for part in (
+                getattr(entity, "first_name", None),
+                getattr(entity, "last_name", None),
+            )
+            if part
+        ).strip()
+        return name or (getattr(entity, "username", None) or "")
 
     @staticmethod
     def _sticker_emoji(message) -> str:
