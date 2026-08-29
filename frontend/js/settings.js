@@ -298,7 +298,7 @@ class SettingsManager {
         const remote = mem.remote || [];
         const rows = [{
           id: 'local',
-          name: local.name || 'Этот сервер',
+          name: local.name || 'Текущий сервер',
           ok: local.ok !== false,
           kind: 'local',
           load: local.load || info.load,
@@ -318,8 +318,8 @@ class SettingsManager {
         });
         slots.innerHTML = rows.map((r) => {
           let status = 'нет связи';
-          if (r.maintenance) status = 'техработы';
-          else if (r.kind === 'local') status = 'этот сервер';
+          if (r.maintenance) status = '⚠️ Технические работы';
+          else if (r.kind === 'local') status = 'Активен';
           else if (r.loading) status = 'модель грузится';
           else if (r.ok) status = 'онлайн';
           const on = r.kind === 'local' ? !r.maintenance : (!!r.ok && !r.loading && !r.maintenance);
@@ -327,7 +327,7 @@ class SettingsManager {
             ? this._loadMeters(r.load)
             : `<div class="load-na">${this._esc(r.error || 'Нет ответа')}</div>`;
           const target = r.kind === 'local' ? 'local' : r.id;
-          const label = r.maintenance ? 'Завершить техработы' : 'Техработы';
+          const label = r.maintenance ? 'Завершить техработы' : '⚠️ Техработы';
           const btnClass = r.maintenance ? 'btn btn-danger-ghost btn-sm' : 'btn btn-ghost btn-sm';
           return `<div class="mem-row ${on ? 'is-on' : 'is-off'}${r.maintenance ? ' is-maint' : ''}">
             <div class="mem-row-head">

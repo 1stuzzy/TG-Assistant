@@ -207,7 +207,7 @@ class TenantsManager {
         <div class="tenant-meta">
           ${this._powerLabel(t.power)} · чатов на аккаунт ${t.max_chats}
           ${t.model_name ? ' · ' + t.model_name : ''}
-          ${t.engine === 'remote' ? ' · удалённый сервер' : ' · этот сервер'}
+          ${t.engine === 'remote' ? ' · удалённый сервер' : ' · текущий сервер'}
         </div>
         <div class="card-actions">
           <button class="btn btn-ghost btn-sm" data-edit="${t.id}">Изменить</button>

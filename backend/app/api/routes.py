@@ -272,7 +272,7 @@ async def system_info(user: dict = Depends(current_user)):
         "maintenance": rental.is_maintenance(),
         "memory": {
             "local": {
-                "name": "Этот сервер",
+                "name": "Текущий сервер",
                 "ok": True,
                 "load": local_load,
                 "maintenance": rental.is_maintenance(),

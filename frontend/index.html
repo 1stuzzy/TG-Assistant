@@ -6,7 +6,7 @@
   <title>TG Manager — управление аккаунтами Telegram</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=1.4.7">
+  <link rel="stylesheet" href="css/styles.css?v=1.4.8">
 
 </head>
 <body>
@@ -108,7 +108,7 @@
     <div class="quota-banner" id="cabinetSuspended" hidden></div>
     <div class="maint-plate tenant-only" id="cabinetMaintBanner" hidden>
       <div class="maint-plate-kicker">Технические работы</div>
-      <p>Добавление аккаунтов и запуск агентов временно недоступны. Оставайтесь в кабинете — когда работы закончатся, придёт уведомление.</p>
+      <p>Сервис временно недоступен. Приносим свои извинения — когда работы закончатся, придёт уведомление.</p>
     </div>
     <div class="stats">
       <div class="stat">
@@ -165,7 +165,7 @@
       <div class="settings-tabs" role="tablist">
         <button class="settings-tab active admin-only" type="button" data-panel="models">Модели</button>
         <button class="settings-tab" type="button" data-panel="characters">Персонажи</button>
-        <button class="settings-tab" type="button" data-panel="telegram">Телеграм</button>
+        <button class="settings-tab" type="button" data-panel="telegram">Telegram</button>
         <button class="settings-tab admin-only" type="button" data-panel="workers">Удалённый сервер</button>
         <button class="settings-tab" type="button" data-panel="system">Система</button>
       </div>
@@ -372,7 +372,7 @@
             <div class="field">
               <label>Движок</label>
               <select class="text-input" id="tenantEngine">
-                <option value="local">Этот сервер</option>
+                <option value="local">Текущий сервер</option>
                 <option value="remote">Удалённый сервер</option>
               </select>
             </div>
@@ -499,7 +499,7 @@
     <div class="field admin-only">
       <label>Где считать модель</label>
       <div class="radio-row">
-        <label><input type="radio" name="agentEngine" id="engineLocal" value="local" checked> Этот сервер</label>
+        <label><input type="radio" name="agentEngine" id="engineLocal" value="local" checked> Текущий сервер</label>
         <label><input type="radio" name="agentEngine" id="engineRemote" value="remote"> Удалённый сервер</label>
       </div>
     </div>
@@ -546,13 +546,13 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="js/api.js?v=1.4.7"></script>
-<script src="js/accounts.js?v=1.4.7"></script>
-<script src="js/wizard.js?v=1.4.7"></script>
-<script src="js/settings.js?v=1.4.7"></script>
-<script src="js/tenants.js?v=1.4.7"></script>
-<script src="js/console.js?v=1.4.7"></script>
-<script src="js/app.js?v=1.4.7"></script>
+<script src="js/api.js?v=1.4.8"></script>
+<script src="js/accounts.js?v=1.4.8"></script>
+<script src="js/wizard.js?v=1.4.8"></script>
+<script src="js/settings.js?v=1.4.8"></script>
+<script src="js/tenants.js?v=1.4.8"></script>
+<script src="js/console.js?v=1.4.8"></script>
+<script src="js/app.js?v=1.4.8"></script>
 
 </body>
 </html>
