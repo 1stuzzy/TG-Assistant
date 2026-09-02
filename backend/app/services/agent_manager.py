@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -27,10 +28,11 @@ from app.config import settings
 from app.services.account_store import AccountStore
 from app.services.character_store import CharacterStore, build_persona, first_name
 from app.services.chat_memory import ChatMemory
-from app.services.llm_engine import DEFAULT_PERSONA, LLMEngine, fallback_reply
+from app.services.llm_engine import DEFAULT_PERSONA, LLMEngine, fallback_nudge, fallback_reply
 from app.services.model_catalog import ModelCatalog
 from app.services.worker_store import WorkerStore
 from app.services.rental_store import effective_folder_title
+from app.services.world_context import clock as world_clock
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,14 @@ VOICE_REPLIES = (
     "не могу слушать, что там?",
 )
 REPLY_FOLDER_ALIASES = {REPLY_FOLDER_TITLE.lower(), "tg-assistant", "ии-агент"}
+NUDGE_GUARD_SEC = 90
+_BYE = re.compile(
+    r"(?i)("
+    r"спокойной ночи|я спать|пошла спать|пош[её]л спать|пошел спать|"
+    r"\bпока\b|бывай|до завтра|давай завтра|давай спать|"
+    r"пойду спать|я отключаюсь"
+    r")"
+)
 
 
 @dataclass
@@ -129,10 +139,22 @@ class AgentManager:
         self._generating_counts: dict[str, int] = {}
         self._remote: dict[str, tuple[str, str]] = {}
         self._folder_ids: dict[str, set[int]] = {}
+        self._nudge_at: dict[str, dict[int, float]] = {}
 
     def is_running(self, account_id: str) -> bool:
         state = self._states.get(account_id)
         return bool(state and state.running)
+
+    def live_client(self, account_id: str) -> Optional[TelegramClient]:
+        client = self._clients.get(account_id)
+        if client is None:
+            return None
+        try:
+            if not client.is_connected():
+                return None
+        except Exception:
+            return None
+        return client
 
     def snapshot(self, account_id: str) -> dict:
         state = self._states.get(account_id)
@@ -316,6 +338,7 @@ class AgentManager:
         self._tasks.pop(account_id, None)
         self._remote.pop(account_id, None)
         self._folder_ids.pop(account_id, None)
+        self._nudge_at.pop(account_id, None)
         return self.snapshot(account_id)
 
     async def stop_all(self) -> None:
@@ -365,7 +388,12 @@ class AgentManager:
 
             @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
             async def on_new_message(event):
-                await self._on_new_message(account_id, client, event, persona)
+                # sequential_updates=True: нельзя ждать весь ответ здесь,
+                # иначе второе сообщение не попадёт в debounce и read-ack.
+                task = asyncio.create_task(
+                    self._on_new_message(account_id, client, event, persona)
+                )
+                task.add_done_callback(self._log_inbox_task)
 
             @client.on(events.Raw)
             async def on_raw(update):
@@ -411,6 +439,7 @@ class AgentManager:
             self._tasks.pop(account_id, None)
             self._remote.pop(account_id, None)
             self._folder_ids.pop(account_id, None)
+            self._nudge_at.pop(account_id, None)
             logger.info("Агент account=%s остановлен", account_id)
 
     async def _wait_stop_or_disconnect(self, client: TelegramClient, stop: asyncio.Event) -> None:
@@ -429,34 +458,47 @@ class AgentManager:
         finally:
             stop_task.cancel()
 
+    @staticmethod
+    def _log_inbox_task(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.exception("Ошибка обработки входящего", exc_info=exc)
+
     async def _on_new_message(self, account_id: str, client: TelegramClient, event, persona: Optional[str]) -> None:
-        text = self._message_text(event.message)
-        if not text:
-            return
-        sender = await event.get_sender()
-        if not self._should_reply(sender):
-            logger.info(
-                "Пропуск отправителя chat=%s bot=%s self=%s",
-                event.chat_id,
-                getattr(sender, "bot", None),
-                getattr(sender, "is_self", None),
-            )
-            return
+        try:
+            text = self._message_text(event.message)
+            if not text:
+                return
+            sender = await event.get_sender()
+            if not self._should_reply(sender):
+                logger.info(
+                    "Пропуск отправителя chat=%s bot=%s self=%s",
+                    event.chat_id,
+                    getattr(sender, "bot", None),
+                    getattr(sender, "is_self", None),
+                )
+                return
 
-        state = self._states.get(account_id)
-        if state:
-            state.last_incoming_at = datetime.now(timezone.utc).isoformat()
-        logger.info("Входящее ЛС chat=%s: %s", event.chat_id, text[:120].replace("\n", " "))
+            state = self._states.get(account_id)
+            if state:
+                state.last_incoming_at = datetime.now(timezone.utc).isoformat()
+            logger.info("Входящее ЛС chat=%s: %s", event.chat_id, text[:120].replace("\n", " "))
 
-        chat_id = event.chat_id
-        token = object()
-        self._latest.setdefault(account_id, {})[chat_id] = (token, event)
-        await asyncio.sleep(1.0)
-        current = self._latest.get(account_id, {}).get(chat_id)
-        if not current or current[0] is not token:
-            return
-        latest_event = current[1]
-        await self._reply(account_id, client, latest_event.message, persona, chat_id)
+            chat_id = event.chat_id
+            token = object()
+            self._latest.setdefault(account_id, {})[chat_id] = (token, event)
+            await asyncio.sleep(1.0)
+            current = self._latest.get(account_id, {}).get(chat_id)
+            if not current or current[0] is not token:
+                return
+            latest_event = current[1]
+            await self._reply(account_id, client, latest_event.message, persona, chat_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка обработки входящего chat=%s", getattr(event, "chat_id", None))
 
     async def _poll_inbox(
         self,
@@ -469,6 +511,8 @@ class AgentManager:
         while not stop.is_set():
             await self._sync_reply_folder(account_id, client)
             await self._scan_dialogs(account_id, client, persona, startup=first)
+            if not first:
+                await self._nudge_silent_chats(account_id, client, persona)
             first = False
             try:
                 await asyncio.wait_for(stop.wait(), timeout=POLL_EVERY_SEC)
@@ -538,6 +582,207 @@ class AgentManager:
         except Exception:
             logger.exception("Ошибка при разборе личных диалогов")
 
+    async def _nudge_silent_chats(
+        self,
+        account_id: str,
+        client: TelegramClient,
+        persona: Optional[str],
+    ) -> None:
+        if not settings.llm_nudge:
+            return
+        state = self._states.get(account_id)
+        if not state or not state.running or state.status not in {"running", "generating"}:
+            return
+        if self._generating_counts.get(account_id, 0) > 0:
+            return
+        started = self._parse_iso(state.started_at)
+        if started and datetime.now(timezone.utc) - started < timedelta(seconds=25):
+            return
+        try:
+            hour = world_clock(state.character_city).now.hour
+        except Exception:
+            hour = datetime.now().hour
+        if hour < 8 or hour >= 23:
+            return
+        after = timedelta(minutes=max(3, int(settings.llm_nudge_after_min)))
+        second = timedelta(minutes=max(20, int(settings.llm_nudge_second_min)))
+        try:
+            async for dialog in client.iter_dialogs(limit=DIALOG_SCAN_LIMIT):
+                if not state.running:
+                    return
+                if await self._maybe_nudge_dialog(account_id, client, persona, dialog, after, second):
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Ошибка при проверке тишины в чатах")
+
+    async def _maybe_nudge_dialog(
+        self,
+        account_id: str,
+        client: TelegramClient,
+        persona: Optional[str],
+        dialog,
+        after: timedelta,
+        second: timedelta,
+    ) -> bool:
+        if not dialog.is_user:
+            return False
+        if not self._folder_allows(account_id, dialog.id):
+            return False
+        if not self._should_reply(dialog.entity):
+            return False
+        chat_id = int(dialog.id)
+        if chat_id in (self._inflight.get(account_id) or set()):
+            return False
+        last_at = (self._nudge_at.get(account_id) or {}).get(chat_id, 0.0)
+        if time.monotonic() - last_at < NUDGE_GUARD_SEC:
+            return False
+        try:
+            messages = await client.get_messages(dialog.entity, limit=12)
+        except Exception:
+            return False
+        texts = [m for m in (messages or []) if m and self._message_text(m)]
+        if not texts:
+            return False
+        has_in = any(not getattr(m, "out", False) for m in texts)
+        has_out = any(getattr(m, "out", False) for m in texts)
+        if not (has_in and has_out):
+            return False
+        last = texts[0]
+        if not getattr(last, "out", False):
+            return False
+        last_date = last.date
+        if last_date is None:
+            return False
+        if last_date.tzinfo is None:
+            last_date = last_date.replace(tzinfo=timezone.utc)
+        silence = datetime.now(timezone.utc) - last_date
+        trailing_out = 0
+        last_out_text = ""
+        last_in_text = ""
+        for msg in texts:
+            chunk = self._message_text(msg)
+            if not chunk:
+                continue
+            if getattr(msg, "out", False):
+                if trailing_out == 0:
+                    last_out_text = chunk
+                trailing_out += 1
+            else:
+                last_in_text = chunk
+                break
+        if trailing_out < 1:
+            return False
+        if _BYE.search(last_out_text or "") or _BYE.search(last_in_text or ""):
+            return False
+        jitter = timedelta(seconds=abs(chat_id) % 360)
+        if trailing_out == 1:
+            if silence < after + jitter:
+                return False
+        elif trailing_out == 2:
+            if silence < second:
+                return False
+        else:
+            return False
+        logger.info(
+            "Тишина в чате %s (%.0f мин, исходящих подряд=%s) — пишу сама",
+            chat_id,
+            silence.total_seconds() / 60,
+            trailing_out,
+        )
+        await self._send_nudge(account_id, client, persona, chat_id)
+        return True
+
+    async def _send_nudge(
+        self,
+        account_id: str,
+        client: TelegramClient,
+        persona: Optional[str],
+        chat_id: int,
+    ) -> None:
+        state = self._states.get(account_id)
+        if not state or not state.running:
+            return
+        account = self._store.get(account_id)
+        if account and account.tenant_id and self._rental:
+            tenant = self._rental.get_tenant(account.tenant_id)
+            if not tenant or tenant["status"] != "active":
+                return
+            if not self._folder_allows(account_id, chat_id):
+                return
+        lock = self._lock_for(account_id, chat_id)
+        async with lock:
+            inflight = self._inflight.setdefault(account_id, set())
+            if chat_id in inflight:
+                return
+            inflight.add(chat_id)
+            self._nudge_at.setdefault(account_id, {})[chat_id] = time.monotonic()
+            typing_stop = asyncio.Event()
+            typing_task = asyncio.create_task(self._keep_typing(client, chat_id, typing_stop))
+            self._generating_counts[account_id] = self._generating_counts.get(account_id, 0) + 1
+            state.status = "generating"
+            state.typing_text = ""
+            try:
+                _, reply_ms = self._delays_for(account_id)
+                if reply_ms:
+                    await asyncio.sleep(min(reply_ms / 1000.0, 4.0))
+                remote = self._remote.get(account_id)
+                history, _ = await self._history(client, chat_id)
+                peer = await self._peer_label(client, chat_id)
+                memory = self._memory.remember(account_id, chat_id, history, peer)
+                account_persona = state.persona or persona or DEFAULT_PERSONA
+                who = first_name({"name": state.character_name}) if state.character_name else None
+
+                def on_partial(text: str) -> None:
+                    state.typing_text = (text or "")[:380]
+
+                reply = await self._llm.generate(
+                    history,
+                    account_persona,
+                    remote_url=remote[0] if remote else None,
+                    remote_key=remote[1] if remote else None,
+                    on_partial=on_partial,
+                    peer=peer,
+                    memory=memory,
+                    city=state.character_city,
+                    name=who,
+                    gender=state.character_gender,
+                    nudge=True,
+                )
+                reply = (reply or "").strip() or fallback_nudge(state.character_city)
+                state.typing_text = reply
+                await asyncio.sleep(min(0.25 + len(reply) * 0.012, 0.9))
+                await client.send_message(chat_id, reply)
+                state.replies += 1
+                state.last_reply_at = datetime.now(timezone.utc).isoformat()
+                state.last_error = None
+                logger.info("Сама написала в тишину chat=%s: %s", chat_id, reply[:120].replace("\n", " "))
+            except FloodWaitError as exc:
+                logger.warning("FloodWait %s сек при тишине", exc.seconds)
+                await asyncio.sleep(exc.seconds + 1)
+            except Exception as exc:
+                logger.exception("Не удалось написать в тишину chat=%s: %s", chat_id, exc)
+                state.last_error = str(exc)
+            finally:
+                inflight.discard(chat_id)
+                state.typing_text = ""
+                typing_stop.set()
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._generating_counts[account_id] = max(
+                    0, self._generating_counts.get(account_id, 1) - 1
+                )
+                if (
+                    state.running
+                    and self._generating_counts.get(account_id, 0) == 0
+                    and state.status == "generating"
+                ):
+                    state.status = "running"
+
     async def _reply(
         self,
         account_id: str,
@@ -594,33 +839,38 @@ class AgentManager:
         state: AgentState,
         latest_id: int,
     ) -> None:
-        msg_id = latest_id or message.id
+        msg_id = max(int(latest_id or 0), int(getattr(message, "id", 0) or 0))
         read_ms, reply_ms = self._delays_for(account_id)
         if read_ms:
             await asyncio.sleep(read_ms / 1000.0)
-        try:
-            await client.send_read_acknowledge(chat_id, message)
-        except Exception:
-            logger.debug("Не удалось отметить сообщение прочитанным chat=%s", chat_id, exc_info=True)
+        msg_id = max(msg_id, await self._latest_incoming_id(client, chat_id))
+        msg_id = await self._mark_read(client, chat_id, msg_id) or msg_id
         if reply_ms:
             await asyncio.sleep(reply_ms / 1000.0)
         await self._maybe_react(client, chat_id, msg_id)
         typing_stop = asyncio.Event()
-        typing_task = asyncio.create_task(self._keep_typing(client, chat_id, typing_stop))
+        saw_newer = asyncio.Event()
+        acked = [msg_id]
+        typing_task: Optional[asyncio.Task] = None
+        ack_task: Optional[asyncio.Task] = None
         self._generating_counts[account_id] = self._generating_counts.get(account_id, 0) + 1
         state.processed += 1
         state.status = "generating"
         state.typing_text = ""
+        typing_task = asyncio.create_task(self._keep_typing(client, chat_id, typing_stop))
+        ack_task = asyncio.create_task(
+            self._ack_while_generating(client, chat_id, acked, saw_newer, typing_stop)
+        )
         try:
             remote = self._remote.get(account_id)
             reply = ""
+            history: list[dict] = []
             peer = await self._peer_label(client, chat_id)
             for attempt in range(5):
-                extra_wait = await self._wait_for_burst(client, chat_id, msg_id)
-                msg_id = max(msg_id, extra_wait)
                 history, last_in_id = await self._history(client, chat_id)
-                if last_in_id:
-                    msg_id = max(msg_id, last_in_id)
+                if last_in_id > msg_id:
+                    msg_id = await self._mark_read(client, chat_id, last_in_id) or last_in_id
+                    acked[0] = max(acked[0], msg_id)
                 memory = self._memory.remember(account_id, chat_id, history, peer)
                 logger.info(
                     "Генерация chat=%s peer=%s реплик=%s память=%s попытка=%s",
@@ -652,10 +902,12 @@ class AgentManager:
                         name=who,
                         gender=state.character_gender,
                     )
-                newer_id = await self._latest_incoming_id(client, chat_id)
-                if newer_id <= msg_id:
+                newer_id = max(acked[0], await self._latest_incoming_id(client, chat_id))
+                if newer_id <= msg_id and not saw_newer.is_set():
                     break
-                msg_id = newer_id
+                msg_id = await self._mark_read(client, chat_id, newer_id) or newer_id
+                acked[0] = max(acked[0], msg_id)
+                saw_newer.clear()
                 logger.info("Пока писали, пришли новые сообщения chat=%s — пересобираю ответ", chat_id)
             state.typing_text = reply
             if not (reply or "").strip():
@@ -664,7 +916,7 @@ class AgentManager:
                     "",
                 )
                 who = first_name({"name": state.character_name}) if state.character_name else None
-                reply = fallback_reply(last_text, who, state.character_gender, state.character_city)
+                reply = fallback_reply(last_text, who, state.character_gender, state.character_city, history)
             await asyncio.sleep(min(0.25 + len(reply) * 0.012, 0.9))
             await client.send_message(chat_id, reply)
             self._replied.setdefault(account_id, {})[chat_id] = msg_id
@@ -681,11 +933,14 @@ class AgentManager:
         finally:
             state.typing_text = ""
             typing_stop.set()
-            typing_task.cancel()
-            try:
-                await typing_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            for task in (typing_task, ack_task):
+                if not task:
+                    continue
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
             self._generating_counts[account_id] = max(
                 0, self._generating_counts.get(account_id, 1) - 1
             )
@@ -707,6 +962,50 @@ class AgentManager:
                 return
             except Exception:
                 return
+
+    async def _ack_while_generating(
+        self,
+        client: TelegramClient,
+        chat_id: int,
+        acked: list[int],
+        dirty: asyncio.Event,
+        stop: asyncio.Event,
+    ) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=0.7)
+                return
+            except asyncio.TimeoutError:
+                pass
+            except asyncio.CancelledError:
+                return
+            try:
+                newest = await self._latest_incoming_id(client, chat_id)
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                continue
+            if newest > acked[0]:
+                acked[0] = await self._mark_read(client, chat_id, newest) or newest
+                dirty.set()
+
+    async def _mark_read(self, client: TelegramClient, chat_id: int, max_id: int) -> int:
+        try:
+            newest = max(int(max_id or 0), await self._latest_incoming_id(client, chat_id))
+        except Exception:
+            newest = int(max_id or 0)
+        if not newest:
+            return 0
+        try:
+            # В ЛС Telegram часто не ставит галочку на само max_id — нужен id строго больше.
+            await client.send_read_acknowledge(chat_id, max_id=newest + 1)
+        except Exception:
+            logger.debug("Не удалось отметить прочитанным chat=%s max_id=%s", chat_id, newest, exc_info=True)
+            try:
+                await client.send_read_acknowledge(chat_id, max_id=newest)
+            except Exception:
+                logger.debug("Повторный read-ack не прошёл chat=%s", chat_id, exc_info=True)
+        return newest
 
     async def _wait_for_burst(self, client: TelegramClient, chat_id: int, known_id: int) -> int:
         """Ждём паузу в наборе, чтобы собрать несколько сообщений в одно обращение."""

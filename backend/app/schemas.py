@@ -40,6 +40,10 @@ class ErrorResponse(BaseModel):
     detail: str
 
 
+class DialogImportRequest(BaseModel):
+    max_pairs: Optional[int] = None
+
+
 class AgentStartRequest(BaseModel):
     model: Optional[str] = None
     persona: Optional[str] = None

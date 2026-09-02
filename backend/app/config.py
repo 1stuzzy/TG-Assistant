@@ -63,6 +63,23 @@ class Settings:
         self.llm_n_threads: int = int(os.getenv("LLM_N_THREADS", "0"))
         self.llm_n_gpu_layers: int = int(os.getenv("LLM_N_GPU_LAYERS", "0"))
         self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "96"))
+        self.llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.82"))
+        self.llm_top_p: float = float(os.getenv("LLM_TOP_P", "1.0"))
+        self.llm_min_p: float = float(os.getenv("LLM_MIN_P", "0.05"))
+        self.llm_repeat_penalty: float = float(os.getenv("LLM_REPEAT_PENALTY", "1.08"))
+        self.llm_dry_multiplier: float = float(os.getenv("LLM_DRY_MULTIPLIER", "0.8"))
+        self.llm_dry_base: float = float(os.getenv("LLM_DRY_BASE", "1.75"))
+        self.llm_dry_allowed_length: int = int(os.getenv("LLM_DRY_ALLOWED_LENGTH", "2"))
+        self.llm_xtc_probability: float = float(os.getenv("LLM_XTC_PROBABILITY", "0"))
+        self.llm_xtc_threshold: float = float(os.getenv("LLM_XTC_THRESHOLD", "0.1"))
+        self.llm_nudge: bool = os.getenv("LLM_NUDGE", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        self.llm_nudge_after_min: int = max(3, int(os.getenv("LLM_NUDGE_AFTER_MIN", "12")))
+        self.llm_nudge_second_min: int = max(20, int(os.getenv("LLM_NUDGE_SECOND_MIN", "90")))
         self.world_timezone: str = os.getenv("WORLD_TIMEZONE", "Europe/Moscow")
         self.world_news: bool = os.getenv("WORLD_NEWS", "1").strip().lower() not in {
             "0",

@@ -21,11 +21,52 @@ from app.services.character_store import is_female, is_male, voice_from_persona
 from app.services.conversation_director import (
     dialogue_shots,
     human_suffix,
+    nudge_hint as director_nudge_hint,
     turn_hint as director_hint,
 )
-from app.services.world_context import snapshot as world_snapshot, clock as world_clock
+from app.services.world_context import (
+    snapshot as world_snapshot,
+    clock as world_clock,
+    spoken_today,
+    wants_day,
+    wants_now,
+)
 
 logger = logging.getLogger(__name__)
+
+_STOP = ["</s>", "<|im_end|>", "<|eot_id|>", "<|endoftext|>"]
+_SAMPLER_DROP = (
+    ("dry_multiplier", "dry_base", "dry_allowed_length"),
+    ("xtc_probability", "xtc_threshold"),
+    ("min_p",),
+    ("repeat_penalty",),
+)
+
+
+def _sampler_extras() -> dict:
+    extra: dict = {}
+    if settings.llm_min_p > 0:
+        extra["min_p"] = settings.llm_min_p
+    if settings.llm_repeat_penalty and abs(settings.llm_repeat_penalty - 1.0) > 0.001:
+        extra["repeat_penalty"] = settings.llm_repeat_penalty
+    if settings.llm_dry_multiplier > 0:
+        extra["dry_multiplier"] = settings.llm_dry_multiplier
+        extra["dry_base"] = settings.llm_dry_base
+        extra["dry_allowed_length"] = settings.llm_dry_allowed_length
+    if settings.llm_xtc_probability > 0:
+        extra["xtc_probability"] = settings.llm_xtc_probability
+        extra["xtc_threshold"] = settings.llm_xtc_threshold
+    return extra
+
+
+def _chat_payload() -> dict:
+    return {
+        "max_tokens": min(80, settings.llm_max_tokens or 80),
+        "temperature": settings.llm_temperature,
+        "top_p": settings.llm_top_p,
+        **_sampler_extras(),
+    }
+
 
 DEFAULT_PERSONA = (
     "Ты живой человек в Telegram. Пиши коротко, как в личке. Не бот и не ассистент."
@@ -56,6 +97,15 @@ _CITY_ASK = re.compile(
 _ASK_BACK = re.compile(
     r"(?i)(а ты как|как дела\s*\??\s*$|а ты\s*\??\s*$|как ты\s*\??\s*$)"
 )
+_LOOKING_FOR = re.compile(
+    r"(?i)("
+    r"кого ищешь|что ищешь|кого тут|"
+    r"зачем (ты )?(здесь|тут)|"
+    r"что (ты )?(тут|здесь) (ищешь|делаешь|забыл)|"
+    r"кого хочешь найти|для чего здесь"
+    r")"
+)
+_LAZY = re.compile(r"(?i)^(ага|угу|ну|мм+|ок|окей|ясно|пон|лол|хаха|аых)\s*[)!.…]*\s*$")
 _GREET_ONLY = re.compile(r"(?i)^\s*(привет|приветик|хай|ку|здаров|здравствуй(те)?|йо)\s*[.!?…)]*\s*$")
 _GREET_PREFIX = re.compile(
     r"(?i)^\s*(привет|приветик|хай|ку|здаров|здравствуй(те)?|йо)\s*[,.!?…:) )]+\s*"
@@ -67,6 +117,7 @@ _BOTTY = re.compile(
     r"сразу начинать|свои штучки|просыпаться|"
     r"как дела у тебя|или ты просто|"
     r"рад(а)? слышать|чем могу|"
+    r"умею отвечать|создавать тексты|в разных стилях|"
     r"не как на допросе|в процессе развития|"
     r"процесс(е)? обучен|я (ещё |еще )?учусь|"
     r"интересными людьми|настоящий романтик|"
@@ -149,8 +200,47 @@ _ABOUT_SELF = re.compile(
 _NAME_ASK = re.compile(
     r"(?i)(как( тебя)? зовут|тво[её] имя|ты кто по имени|имя\s*\??\s*$)"
 )
+_NAME_BACK = re.compile(
+    r"(?i)(а тебя\s*\?*\s*$|а тебя как|а как тебя|тебя как зовут|а тво[её] имя)"
+)
+_TASK_ASK = re.compile(
+    r"(?i)("
+    r"напиши(те)? (мне )?(код|скрипт|программ|калькулятор|бот|сайт|функци|парсер)|"
+    r"калькулятор|"
+    r"на python|на питоне|на javascript|"
+    r"```|"
+    r"реши (задач|пример|уравнен)|"
+    r"сделай домашк|"
+    r"сочини (эссе|сочинен|стих)|"
+    r"переведи (на англий|текст)"
+    r")"
+)
+_CODE_DUMP = re.compile(
+    r"(?i)(```|def\s+\w+\s*\(|import\s+\w+|while\s+true|print\s*\(|function\s+\w+|class\s+\w+|<!doctype)"
+)
+_ASSISTANT_BIO = re.compile(
+    r"(?i)("
+    r"умею отвечать|"
+    r"создавать тексты|"
+    r"в разных стилях|"
+    r"я (ваш |твой )?ассистент|"
+    r"я помощник|"
+    r"генерир\w+ текст|"
+    r"чем могу помочь|"
+    r"задавай вопросы|"
+    r"языков\w+\s+модель"
+    r")"
+)
 _DV_HELLO = re.compile(
-    r"(?i)((привет|приветик|хай|ку).{0,50}(дайвинчик|винчик|\bдв\b)|с дайвинчика|из дв|из винчика|я с дайвинчик|я с винчика)"
+    r"(?i)("
+    r"(привет|приветик|хай|ку).{0,80}(дайвинчик|давинчик|винчик|\bдв\b)|"
+    r"с дайвинчика|из дайвинчика|с винчика|из винчика|"
+    r"я с дайвинчик|я с винчика|я с дв\b|"
+    r"из дв\b"
+    r")"
+)
+_DIVING_LEAK = re.compile(
+    r"(?i)(дайвинг|diving|scuba|подводн|акваланг|ныря|нырн)"
 )
 _HINT_LEAK = re.compile(
     r"(?i)("
@@ -158,7 +248,17 @@ _HINT_LEAK = re.compile(
     r"анкеты/?мэтчи|мэтчи оттуда|подсказк|"
     r"запрещено писать|1–2 коротких|"
     r"свежие заголовки|не называй дату|живи в этом моменте|"
-    r"не дайджестом"
+    r"не дайджестом|"
+    r"не chatgpt|код и калькулятор не пишешь|ты человек в личке"
+    r")"
+)
+_SEPIA_LEAD = re.compile(
+    r"(?i)^(о+[,!.]?\s+|"
+    r"понимаю[,.]?\s+|я понимаю[,.]?\s+|"
+    r"звучит так(?:[,]?\s+будто)?[,.]?\s+|"
+    r"это важно[,.]?\s+|честно говоря[,.]?\s+|"
+    r"кстати[,.]?\s+|в любом случае[,.]?\s+|"
+    r"главное(?:[,]?\s+что)?[,.]?\s+"
     r")"
 )
 _PAINTER_LEAK = re.compile(
@@ -214,6 +314,10 @@ def _cleanup(text: str) -> str:
     ):
         if text.lower().startswith(prefix.lower()):
             text = text[len(prefix) :].strip()
+    text = text.replace("👋", "").strip()
+    text = _SEPIA_LEAD.sub("", text, count=1).strip()
+    if _CODE_DUMP.search(text):
+        return ""
     text = re.sub(r"\n{3,}", "\n\n", text)
     if re.search(r"(?m)^\s*\d+[\.)]\s", text) or re.search(r"(?m)^\s*[-•]\s", text):
         first = text.split("\n", 1)[0].strip()
@@ -228,6 +332,7 @@ def _cleanup(text: str) -> str:
         if (
             _BOT_NOISE.search(chunk)
             or _AI_LEAK.search(chunk)
+            or _ASSISTANT_BIO.search(chunk)
             or _BIO_DUMP.search(chunk)
             or _HINT_LEAK.search(chunk)
         ):
@@ -270,10 +375,16 @@ def _turn_hint(
     text = (last_user or "").strip()
     if re.search(r"(?i)\b(ты бот|ты ии|нейросет)\b", text):
         return "Отшутись, не признавайся что бот."
-    if _NAME_ASK.search(text) and name:
+    if _TASK_ASK.search(text):
+        return "Он просит код или задачу как у ChatGPT. Не пиши код. Коротко отшутись."
+    if (_NAME_ASK.search(text) or _NAME_BACK.search(text)) and name:
         return f"Он спросил имя. Ответь коротко: {name}."
+    if wants_day(text):
+        return "Он спросил про день. Ответь бытом из блока сегодня, не «ага»."
+    if wants_now(text):
+        return "Он спросил чем сейчас. Одна фраза из «сейчас» в блоке сегодня."
     if _HOW_ARE_YOU.search(text):
-        return "Он спросил как у тебя. Ответь про себя из промта. Вопрос в ответ не обязателен."
+        return "Он спросил как у тебя. Коротко, можно одну деталь из блока сегодня."
     if _GREET_ONLY.match(text):
         return "Коротко поприветствуй, без представления."
     if re.search(r"(?i)знаком", text):
@@ -311,12 +422,21 @@ def _how_are_you_replies(city: Optional[str] = None) -> tuple[str, ...]:
     except Exception:
         part = ""
     if part == "ночь":
-        return ("да ничего, ещё не сплю)", "норм, ты чего не спишь?", "тоже ок")
+        return ("да ничего, ещё не сплю. ты как?", "норм, ты чего не спишь?", "тихо, устала чуть")
     if part in {"раннее утро", "утро"}:
-        return ("да норм)", "норм, ты как?", "тоже ок")
+        return ("да норм, только раскачиваюсь. ты как?", "всё хорошо. как ты?", "норм, ты как?")
     if part == "вечер":
-        return ("да норм)", "норм, ты как?", "тоже ок")
-    return _HOW_ARE_YOU_REPLIES
+        return ("да ничего, работала. ты как?", "чуть устала, день был. у тебя как?", "всё норм. как день?")
+    return ("да ничего, ты как?", "всё хорошо, работала. а у тебя?", "норм, чуть устала. ты как?")
+
+
+def _task_refuse_reply() -> str:
+    return random.choice((
+        "лол я не по этому)",
+        "неа, давай лучше как обычно",
+        "всм код? да ну",
+        "я ж не программист)",
+    ))
 
 
 def _name_reply(name: Optional[str], gender: Optional[str]) -> str:
@@ -328,16 +448,37 @@ def _name_reply(name: Optional[str], gender: Optional[str]) -> str:
     return who
 
 
+def _identity_pin(name: Optional[str], gender: Optional[str]) -> str:
+    who = (name or "").strip()
+    if is_female(gender):
+        body = f"Тебя зовут {who}." if who else "Ты девушка из промта."
+        return body + " Ты человек в личке, не ChatGPT. Код и калькулятор не пишешь — отшутись."
+    if is_male(gender):
+        body = f"Тебя зовут {who}." if who else "Ты парень из промта."
+        return body + " Ты человек в личке, не ChatGPT. Код и калькулятор не пишешь — отшутись."
+    if who:
+        return f"Тебя зовут {who}. Ты человек в личке, не ChatGPT. Код не пишешь."
+    return "Ты человек в личке, не ChatGPT. Код и калькулятор не пишешь."
+
+
 def _dv_hello_reply() -> str:
-    return random.choice(("приветик, давно вообще там сидишь?", "приветик", "привет, как давно в дв уже?"))
+    return random.choice((
+        "приветик, давно уже?",
+        "приветик) как давно сидишь?",
+        "ну приветик, давно тут?",
+    ))
 
 
 def _bot_reply() -> str:
-    return random.choice(("нет", "неа", "окак, нет)"))
+    return random.choice((
+        "нет, с чего такие выводы",
+        "нет) с чего вдруг",
+        "неа, просто пишу как пишу",
+    ))
 
 
 def _get_acq_reply() -> str:
-    return random.choice(("давай, ты откуда?", "ну давай)", "ага, давай"))
+    return random.choice(("давай, ты откуда?", "ну давай)", "давай, как зовут?"))
 
 
 def _city_mentioned(city: Optional[str], reply: str) -> bool:
@@ -357,6 +498,45 @@ def _city_reply(city: Optional[str]) -> str:
     return "а ты откуда?"
 
 
+def _city_reply_back(city: Optional[str]) -> str:
+    where = (city or "").strip()
+    if where:
+        return random.choice((
+            f"тоже {where}",
+            f"я из {where}",
+            f"из {where})",
+        ))
+    return "я тоже, а тебе как там?"
+
+
+_NOT_A_NAME = {
+    "тоже", "тут", "дома", "просто", "сейчас", "там", "ещё", "еще",
+    "недавно", "нормально", "жива", "живой", "из", "москва", "москвы",
+}
+
+_DUMMY_NAMES = ("лена", "катя")
+
+
+def _foreign_self_name(reply: str, name: Optional[str]) -> bool:
+    who = (name or "").strip().lower()
+    text = reply or ""
+    claimed = re.search(
+        r"(?i)(?:меня зовут|меня\s+|я\s*[-—:]\s+)([а-яёa-z]{3,})",
+        text,
+    )
+    if claimed:
+        got = claimed.group(1).lower()
+        if got not in _NOT_A_NAME and who and got != who:
+            return True
+    if who:
+        for dummy in _DUMMY_NAMES:
+            if dummy != who and re.search(rf"(?i)\b{dummy}\b", text):
+                return True
+        if re.match(rf"(?i)^{re.escape(name.strip())}\s*,", text):
+            return True
+    return False
+
+
 def _gender_broken(reply: str, gender: Optional[str]) -> bool:
     if is_female(gender) and _MASC_SELF.search(reply or ""):
         return True
@@ -365,34 +545,123 @@ def _gender_broken(reply: str, gender: Optional[str]) -> bool:
     return False
 
 
+def _ask_back_reply(
+    history: Optional[list],
+    name: Optional[str],
+    gender: Optional[str],
+    city: Optional[str],
+) -> str:
+    prev = next(
+        (m.get("content") or "" for m in reversed(history or []) if m.get("role") == "assistant"),
+        "",
+    )
+    if _DAIVINCHIK_TALK.search(prev) or re.search(r"(?i)давно", prev):
+        return random.choice((
+            "недавно ещё, только осваиваюсь",
+            "тоже недавно. тебе как тут?",
+            "ну недавно, ещё смотрю как оно",
+        ))
+    if _HOW_ARE_YOU.search(prev):
+        return random.choice(_how_are_you_replies(city))
+    if _NAME_ASK.search(prev) or "зовут" in prev.lower():
+        return _name_reply(name, gender)
+    if _CITY_ASK.search(prev) or re.search(r"(?i)откуда", prev):
+        return _city_reply_back(city)
+    return random.choice((
+        "я тоже так. а ты сам как тут?",
+        "ну похоже. ты чаще сам пишешь первым?",
+    ))
+
+
+def _looking_for_reply(gender: Optional[str]) -> str:
+    if is_female(gender):
+        return random.choice((
+            "просто живого человека, не игры. а ты?",
+            "познакомиться нормально. ты сам кого ищешь?",
+            "без цирка, просто человека. а ты тут за чем?",
+        ))
+    return random.choice((
+        "просто пообщаться нормально. а ты?",
+        "человека, не анкету. ты сам зачем?",
+    ))
+
+
+def _user_asked(text: str) -> bool:
+    t = text or ""
+    return bool(
+        "?" in t
+        or "？" in t
+        or _ASK_BACK.search(t)
+        or _LOOKING_FOR.search(t)
+        or _NAME_ASK.search(t)
+        or _NAME_BACK.search(t)
+        or _HOW_ARE_YOU.search(t)
+        or _ABOUT_SELF.search(t)
+        or _CITY_ASK.search(t)
+    )
+
+
 def fallback_reply(
     last_user: str,
     name: Optional[str] = None,
     gender: Optional[str] = None,
     city: Optional[str] = None,
+    history: Optional[list] = None,
 ) -> str:
     text = last_user or ""
     if _BOT_ASK.search(text):
         return _bot_reply()
+    if _TASK_ASK.search(text):
+        return _task_refuse_reply()
+    if _LOOKING_FOR.search(text):
+        return _looking_for_reply(gender)
+    if _ASK_BACK.search(text):
+        return _ask_back_reply(history, name, gender, city)
     if _GET_ACQ.search(text):
         return _get_acq_reply()
     if _CITY_ASK.search(text):
         return _city_reply(city)
-    if _NAME_ASK.search(text):
+    if _NAME_ASK.search(text) or _NAME_BACK.search(text):
         return _name_reply(name, gender)
     if _DV_HELLO.search(text):
         return _dv_hello_reply()
+    if wants_day(text):
+        return spoken_today(city, gender=gender, kind="day")
+    if wants_now(text):
+        return spoken_today(city, gender=gender, kind="now")
     if _HOW_ARE_YOU.search(text):
         return random.choice(_how_are_you_replies(city))
     if _GREET_ONLY.match(text):
-        return random.choice(("привет", "приветик"))
+        return random.choice(("приветик)", "приветик, как день?"))
     if _ABOUT_SELF.search(text):
         if is_female(gender) and name:
             return f"я {name}, обычная жизнь. а ты?"
         if name:
             return f"я {name}. а ты чем занят?"
         return "ну что сказать, обычная жизнь. а ты?"
-    return random.choice(("мммм", "ну", "аыхвахыв", "ага"))
+    if _user_asked(text):
+        return random.choice((
+            "ну недавно, ты сам как тут оказался?",
+            "да так, познакомиться. а ты?",
+            "пока просто болтаю. тебе как тут?",
+        ))
+    return random.choice(("мм", "ну ты чего", "хаха"))
+
+
+def fallback_nudge(city: Optional[str] = None) -> str:
+    try:
+        part = world_clock(city).part
+    except Exception:
+        part = ""
+    if part == "ночь":
+        return random.choice(("не спишь ещё?", "ты куда)", "я ещё тут"))
+    return random.choice((
+        "ты куда)",
+        "чё как там",
+        "я тут",
+        "ну ты это",
+        "ещё живой?",
+    ))
 
 
 def _fix_reply(
@@ -402,30 +671,66 @@ def _fix_reply(
     city: Optional[str] = None,
     name: Optional[str] = None,
     gender: Optional[str] = None,
+    *,
+    nudge: bool = False,
 ) -> str:
     reply = (text or "").strip()
+    reply = re.sub(r"(?i)\bхай\b", "приветик", reply)
+    reply = re.sub(r"(?i)\s*,?\s*тоже оттуда\.?\s*", " ", reply)
+    reply = re.sub(r"\s+", " ", reply).strip(" ,")
     prev_assistant = next(
         (m.get("content") or "" for m in reversed(history or []) if m.get("role") == "assistant"),
         "",
     )
     if _too_alike(reply, prev_assistant):
         reply = ""
+    if _foreign_self_name(reply, name):
+        reply = ""
     greeted = _already_greeted(history)
-    if greeted and reply:
+    if (greeted or nudge) and reply:
         reply = _GREET_PREFIX.sub("", reply).strip()
+        reply = re.sub(r"(?i)\b(привет|приветик|хай)\b[!.]*", "", reply).strip(" ,")
         reply = re.sub(r"(?i)^да,\s*", "", reply).strip()
+        if name and re.match(rf"(?i)^{re.escape(name.strip())}\s*,", reply):
+            reply = ""
+    if nudge:
+        if (
+            not reply
+            or _BOTTY.search(reply)
+            or _AI_LEAK.search(reply)
+            or _ASSISTANT_BIO.search(reply)
+            or _HINT_LEAK.search(reply)
+            or _gender_broken(reply, gender)
+            or len(reply) > 90
+        ):
+            return fallback_nudge(city)
+        return reply
+    if last_user and _DV_HELLO.search(last_user):
+        return _dv_hello_reply()
     if last_user and _GREET_ONLY.match(last_user):
         if not reply or len(reply) > 40 or _BIO_DUMP.search(reply) or _BOTTY.search(reply) or _gender_broken(reply, gender):
-            return random.choice(("приветик", "привет", "привет)"))
+            return random.choice(("приветик)", "приветик, как день?"))
         if _GREET_WORD.search(reply) and _question_count(reply):
-            return random.choice(("приветик", "привет", "привет)"))
-        if re.fullmatch(r"(?i)привет[.!]?$", reply or ""):
-            return "привет)"
+            return random.choice(("приветик)", "приветик, как день?"))
+        if re.fullmatch(r"(?i)(привет|хай)[.!]?$", reply or ""):
+            return "приветик)"
         return reply
-    if last_user and _NAME_ASK.search(last_user):
+    if last_user and _TASK_ASK.search(last_user):
+        if (
+            not reply
+            or _CODE_DUMP.search(reply)
+            or _ASSISTANT_BIO.search(reply)
+            or _AI_LEAK.search(reply)
+            or _BOTTY.search(reply)
+            or len(reply) > 90
+        ):
+            return _task_refuse_reply()
+        return reply
+    if last_user and (_NAME_ASK.search(last_user) or _NAME_BACK.search(last_user)):
         bad = (
             not reply
             or _AI_LEAK.search(reply)
+            or _ASSISTANT_BIO.search(reply)
             or _BOTTY.search(reply)
             or _HINT_LEAK.search(reply)
             or _gender_broken(reply, gender)
@@ -434,6 +739,29 @@ def _fix_reply(
         )
         if bad:
             return _name_reply(name, gender)
+        return reply
+    if last_user and _LOOKING_FOR.search(last_user):
+        if (not reply) or _LAZY.match(reply) or _ASSISTANT_BIO.search(reply) or _BOTTY.search(reply) or _gender_broken(reply, gender) or len(reply) > 90:
+            return _looking_for_reply(gender)
+        return reply
+    if last_user and _ASK_BACK.search(last_user):
+        prev_was_city = bool(_CITY_ASK.search(prev_assistant) or re.search(r"(?i)откуда", prev_assistant or ""))
+        bad = (
+            not reply
+            or _LAZY.match(reply)
+            or _ASSISTANT_BIO.search(reply)
+            or _only_question(reply)
+            or _gender_broken(reply, gender)
+            or _foreign_self_name(reply, name)
+            or len(reply) > 90
+        )
+        if prev_was_city:
+            bad = bad or (bool(city) and not _city_mentioned(city, reply or ""))
+            if bad:
+                return _city_reply_back(city)
+            return reply
+        if bad:
+            return _ask_back_reply(history, name, gender, city)
         return reply
     if last_user and _BOT_ASK.search(last_user):
         if (
@@ -444,7 +772,7 @@ def _fix_reply(
             or _HOW_ARE_YOU.search(reply)
             or _gender_broken(reply, gender)
             or len(reply) > 50
-            or re.search(r"(?i)(не сплю|как дела|оттуда|дружеск)", reply)
+            or re.search(r"(?i)(не сплю|как дела|оттуда|дружеск|лол с чего|\bхай\b)", reply)
         ):
             return _bot_reply()
         return reply
@@ -454,7 +782,9 @@ def _fix_reply(
             or _BOTTY.search(reply)
             or _BIO_DUMP.search(reply)
             or _HINT_LEAK.search(reply)
-            or re.search(r"(?i)(это норм|познакомиться|дружеск)", reply)
+            or _foreign_self_name(reply, name)
+            or re.search(r"(?i)(это норм|познакомиться|дружеск|я тоже)", reply)
+            or reply.count(")") >= 3
             or len(reply) > 40
         ):
             return _get_acq_reply()
@@ -466,6 +796,7 @@ def _fix_reply(
             or _BOTTY.search(reply)
             or _HINT_LEAK.search(reply)
             or _AI_LEAK.search(reply)
+            or _foreign_self_name(reply, name)
             or re.search(r"(?i)(оттуда|дружеск|стараюсь)", reply)
             or len(reply) > 50
             or (where and not _city_mentioned(where, reply))
@@ -473,45 +804,53 @@ def _fix_reply(
         if bad:
             return _city_reply(city)
         return reply
+    if last_user and wants_day(last_user):
+        too_long = len(reply) > 110
+        botty = bool(_BOTTY.search(reply) or _BIO_DUMP.search(reply) or _LAZY.match(reply or ""))
+        if (not reply) or too_long or botty or _only_question(reply) or _gender_broken(reply, gender):
+            return spoken_today(city, gender=gender, kind="day")
+        return reply
+    if last_user and wants_now(last_user):
+        too_long = len(reply) > 90
+        botty = bool(_BOTTY.search(reply) or _BIO_DUMP.search(reply) or _LAZY.match(reply or ""))
+        if (not reply) or too_long or botty or _only_question(reply) or _gender_broken(reply, gender):
+            return spoken_today(city, gender=gender, kind="now")
+        return reply
     if last_user and _HOW_ARE_YOU.search(last_user):
-        too_long = len(reply) > 70
+        too_long = len(reply) > 90
         too_many_q = _question_count(reply) > 1
         botty = bool(_BOTTY.search(reply) or _BIO_DUMP.search(reply))
         no_self = _only_question(reply) and _ASK_BACK.search(reply or "")
         greet_again = bool(_GREET_WORD.search(reply or "")) and not _GREET_WORD.search(last_user)
         if (not reply) or too_long or too_many_q or botty or no_self or greet_again or _gender_broken(reply, gender):
             return random.choice(_how_are_you_replies(city))
-    if last_user and _DV_HELLO.search(last_user):
-        if (
-            not reply
-            or _BOTTY.search(reply)
-            or _HINT_LEAK.search(reply)
-            or _AI_LEAK.search(reply)
-            or _gender_broken(reply, gender)
-            or re.search(r"(?i)давай|познакоми", reply)
-            or len(reply) > 40
-        ):
-            return _dv_hello_reply()
     if last_user and _ABOUT_SELF.search(last_user):
         if (
             not reply
             or _AI_LEAK.search(reply)
+            or _ASSISTANT_BIO.search(reply)
             or _BOTTY.search(reply)
             or _HINT_LEAK.search(reply)
             or _gender_broken(reply, gender)
             or len(reply) > 120
         ):
-            return fallback_reply(last_user, name, gender, city)
-    if last_user and _DAIVINCHIK_TALK.search(last_user) and _PAINTER_LEAK.search(reply or ""):
+            return fallback_reply(last_user, name, gender, city, history)
+    if last_user and _DAIVINCHIK_TALK.search(last_user) and (
+        _PAINTER_LEAK.search(reply or "") or _DIVING_LEAK.search(reply or "")
+    ):
         if re.search(r"(?i)что это|что такое|это про", last_user):
-            return "бот в тг для знакомств, не да винчи)"
+            return "бот в тг для знакомств, не дайвинг)"
+        if _DV_HELLO.search(last_user):
+            return _dv_hello_reply()
         return "ну да, винчик, знакомства"
-    if not reply or _AI_LEAK.search(reply or "") or _gender_broken(reply or "", gender):
-        return fallback_reply(last_user, name, gender, city)
+    if not reply or _LAZY.match(reply or "") or _AI_LEAK.search(reply or "") or _gender_broken(reply or "", gender):
+        return fallback_reply(last_user, name, gender, city, history)
+    if reply and _ASSISTANT_BIO.search(reply):
+        return fallback_reply(last_user, name, gender, city, history)
     if reply and (_HINT_LEAK.search(reply) or _BOTTY.search(reply)):
         if last_user and _HOW_ARE_YOU.search(last_user):
             return random.choice(_how_are_you_replies(city))
-        return fallback_reply(last_user, name, gender, city)
+        return fallback_reply(last_user, name, gender, city, history)
     if (
         reply
         and last_user
@@ -529,7 +868,7 @@ def _fix_reply(
         ).strip()
         reply = re.sub(r"\b\d{1,2}:\d{2}\b", "", reply).strip(" ,.-")
         if not reply:
-            return fallback_reply(last_user, name, gender, city)
+            return fallback_reply(last_user, name, gender, city, history)
     return reply
 
 
@@ -552,21 +891,25 @@ def _system_prompt(
     peer: Optional[str] = None,
     memory: Optional[str] = None,
     world: Optional[str] = None,
+    name: Optional[str] = None,
+    gender: Optional[str] = None,
 ) -> str:
     persona_text = (persona or DEFAULT_PERSONA).strip()
     memory_text = (memory or "").strip()
     world_text = (world or "").strip()
+    pin = _identity_pin(name, gender)
     suffix = (
         human_suffix()
         + " "
         + _isolation_line(peer)
         + " Отвечай только текстом сообщения. Смотри историю и память этого чата: не переспрашивай уже сказанное."
     )
-    persona_max = 860
-    memory_max = 480
-    world_max = 280
-    system_max = 1900
-    suffix_min = 180
+    persona_max = 1180
+    memory_max = 420
+    world_max = 420
+    system_max = 2150
+    suffix_min = 160
+    pin_len = len(pin) + 1
     persona_text = persona_text[:persona_max].rstrip()
     if world_text:
         world_block = world_text[:world_max]
@@ -581,7 +924,7 @@ def _system_prompt(
         used += 1 + len(world_block)
     if memory_block:
         used += 1 + len(memory_block)
-    room = system_max - used - 1
+    room = system_max - used - 1 - pin_len
     if room < suffix_min:
         overflow = suffix_min - room
         persona_text = persona_text[: max(400, len(persona_text) - overflow)].rstrip()
@@ -590,13 +933,14 @@ def _system_prompt(
             used += 1 + len(world_block)
         if memory_block:
             used += 1 + len(memory_block)
-        room = system_max - used - 1
+        room = system_max - used - 1 - pin_len
     parts = [persona_text]
     if world_block:
         parts.append(world_block)
     if memory_block:
         parts.append(memory_block)
     parts.append(suffix[: max(0, room)].rstrip())
+    parts.append(pin)
     return " ".join(p for p in parts if p).strip()
 
 
@@ -638,6 +982,7 @@ def _messages(
     city: Optional[str] = None,
     name: Optional[str] = None,
     gender: Optional[str] = None,
+    nudge: bool = False,
 ) -> list[dict]:
     name, gender, city = _resolve_voice(persona, name, gender, city)
     last_user = next(
@@ -645,24 +990,52 @@ def _messages(
         "",
     )
     try:
-        world = world_snapshot(city, last_user)
+        world = world_snapshot(city, last_user, persona, gender)
     except Exception:
         logger.debug("Живой контекст недоступен", exc_info=True)
         world = ""
-    messages: list[dict] = [{"role": "system", "content": _system_prompt(persona, peer, memory, world)}]
+    messages: list[dict] = [{
+        "role": "system",
+        "content": _system_prompt(persona, peer, memory, world, name, gender),
+    }]
     for user, assistant in dialogue_shots():
         messages.append({"role": "user", "content": user})
         messages.append({"role": "assistant", "content": assistant})
+    who = (name or "").strip()
+    where = (city or "").strip()
+    lock = (
+        "Примеры выше — тон лички. Правила из dialogues.jsonl главные: "
+        "дайвинчик/дв/винчик = бот знакомств в телеге, не дайвинг и не да винчи. "
+        "Не копируй из примеров имена и города."
+    )
+    if who:
+        lock += f" Тебя зовут {who}."
+    if where:
+        lock += f" Живёшь в {where}."
+    lock += " Не здоровайся второй раз и не представляйся другим именем."
+    lock += " Быт и «чем занималась» бери из блока сегодня, не копируй магазин из примеров если в блоке другое."
+    messages.append({"role": "system", "content": lock})
     last_user = ""
     for item in _recent_history(history):
         messages.append({"role": item["role"], "content": item["content"]})
         if item["role"] == "user":
             last_user = item["content"]
-    if last_user:
+    if nudge:
+        try:
+            hint = director_nudge_hint(history, city=city, name=name)
+        except Exception:
+            hint = "Он замолчал. Напиши коротко сама, без привета."
+        messages.append({
+            "role": "user",
+            "content": "[тишина]\n\n[Не копируй примеры. " + hint + "]",
+        })
+    elif last_user:
         hint = _turn_hint(history, last_user, city, name, gender)
         for i in range(len(messages) - 1, 0, -1):
             if messages[i]["role"] == "user":
-                messages[i]["content"] = messages[i]["content"] + "\n\n[" + hint + "]"
+                messages[i]["content"] = (
+                    messages[i]["content"] + "\n\n[Не копируй примеры. " + hint + "]"
+                )
                 break
     return messages
 
@@ -694,6 +1067,7 @@ class LLMEngine:
         self._load_lock = asyncio.Lock()
         self._gen_lock = asyncio.Lock()
         self._http: Optional[httpx.AsyncClient] = None
+        self._sampler_ok: Optional[tuple] = None
 
     async def _http_client(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -732,6 +1106,7 @@ class LLMEngine:
             raise FileNotFoundError(f"Файл модели не найден: {model_path}")
 
         self._unload_sync()
+        self._sampler_ok = None
         n_threads = settings.llm_n_threads
         cpu = os.cpu_count() or 4
         if n_threads <= 0:
@@ -784,6 +1159,7 @@ class LLMEngine:
         city: Optional[str] = None,
         name: Optional[str] = None,
         gender: Optional[str] = None,
+        nudge: bool = False,
     ) -> str:
         async with self._gen_lock:
             if remote_url:
@@ -798,6 +1174,7 @@ class LLMEngine:
                     city,
                     name,
                     gender,
+                    nudge,
                 )
             if self._llm is None:
                 raise RuntimeError("Локальная модель не загружена")
@@ -811,6 +1188,7 @@ class LLMEngine:
                 city,
                 name,
                 gender,
+                nudge,
             )
 
     def _reset_context(self) -> None:
@@ -828,30 +1206,49 @@ class LLMEngine:
 
     def _complete(self, messages: list[dict], on_partial: Optional[Callable[[str], None]]) -> str:
         self._reset_context()
-        kwargs = dict(
-            messages=messages,
-            max_tokens=min(64, settings.llm_max_tokens or 64),
-            temperature=0.82,
-            top_p=0.9,
-            stop=["</s>", "<|im_end|>", "<|eot_id|>", "<|endoftext|>"],
-        )
-        def _run(**extra) -> str:
+        extras = _sampler_extras()
+        if self._sampler_ok is not None:
+            extras = {k: extras[k] for k in self._sampler_ok if k in extras}
+
+        def _run(extra: dict) -> str:
+            kwargs = dict(
+                messages=messages,
+                max_tokens=min(80, settings.llm_max_tokens or 80),
+                temperature=settings.llm_temperature,
+                top_p=settings.llm_top_p,
+                stop=_STOP,
+                **extra,
+            )
             if on_partial:
                 acc = ""
-                for chunk in self._llm.create_chat_completion(**kwargs, **extra, stream=True):
+                for chunk in self._llm.create_chat_completion(**kwargs, stream=True):
                     delta = _chunk_delta(chunk)
                     if not delta:
                         continue
                     acc += delta
                     on_partial(acc)
                 return acc
-            result = self._llm.create_chat_completion(**kwargs, **extra)
+            result = self._llm.create_chat_completion(**kwargs)
             return result["choices"][0]["message"].get("content") or ""
 
-        try:
-            return _run(repeat_penalty=1.18)
-        except TypeError:
-            return _run()
+        while True:
+            try:
+                text = _run(extras)
+                if self._sampler_ok is None:
+                    self._sampler_ok = tuple(extras.keys())
+                    logger.info("Сэмплеры: %s", ", ".join(extras) or "базовые")
+                return text
+            except TypeError:
+                dropped = False
+                for group in _SAMPLER_DROP:
+                    if any(k in extras for k in group):
+                        for key in group:
+                            extras.pop(key, None)
+                        dropped = True
+                        break
+                if not dropped:
+                    return _run({})
+                self._sampler_ok = None
 
     def _generate_sync(
         self,
@@ -863,12 +1260,13 @@ class LLMEngine:
         city: Optional[str] = None,
         name: Optional[str] = None,
         gender: Optional[str] = None,
+        nudge: bool = False,
     ) -> str:
         name, gender, city = _resolve_voice(persona, name, gender, city)
-        messages = _messages(history, persona, peer, memory, city, name, gender)
+        messages = _messages(history, persona, peer, memory, city, name, gender, nudge)
         prompt_chars = sum(len(m.get("content") or "") for m in messages)
         logger.info(
-            "Промт: peer=%s сообщений=%s символов=%s persona=%s name=%s gender=%s city=%s",
+            "Промт: peer=%s сообщений=%s символов=%s persona=%s name=%s gender=%s city=%s nudge=%s",
             (peer or "—")[:40],
             len(messages),
             prompt_chars,
@@ -876,6 +1274,7 @@ class LLMEngine:
             name or "—",
             gender or "—",
             (city or "—")[:40],
+            nudge,
         )
         t0 = time.perf_counter()
         try:
@@ -886,7 +1285,7 @@ class LLMEngine:
             mini = [
                 {
                     "role": "system",
-                    "content": _system_prompt(persona, peer, memory),
+                    "content": _system_prompt(persona, peer, memory, name=name, gender=gender),
                 },
                 {"role": "user", "content": last_user[:400]},
             ]
@@ -895,13 +1294,17 @@ class LLMEngine:
             except Exception as exc2:
                 logger.exception("Повторная генерация тоже упала: %s", exc2)
                 last = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
-                return fallback_reply(last, name, gender, city)
+                if nudge:
+                    return fallback_nudge(city)
+                return fallback_reply(last, name, gender, city, history)
         cleaned = _cleanup(text)
         last_user = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
-        cleaned = _fix_reply(cleaned, last_user, history, city, name, gender)
+        cleaned = _fix_reply(cleaned, last_user, history, city, name, gender, nudge=nudge)
         elapsed = time.perf_counter() - t0
         logger.info("Локальная генерация %.1f сек, символов: %s", elapsed, len(cleaned))
-        return cleaned or fallback_reply(last_user, name, gender, city)
+        if nudge:
+            return cleaned or fallback_nudge(city)
+        return cleaned or fallback_reply(last_user, name, gender, city, history)
 
     async def _generate_remote(
         self,
@@ -915,10 +1318,11 @@ class LLMEngine:
         city: Optional[str] = None,
         name: Optional[str] = None,
         gender: Optional[str] = None,
+        nudge: bool = False,
     ) -> str:
         name, gender, city = _resolve_voice(persona, name, gender, city)
         messages = await asyncio.to_thread(
-            _messages, history, persona, peer, memory, city, name, gender
+            _messages, history, persona, peer, memory, city, name, gender, nudge
         )
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -926,9 +1330,7 @@ class LLMEngine:
         payload = {
             "model": "local",
             "messages": messages,
-            "max_tokens": min(64, settings.llm_max_tokens or 64),
-            "temperature": 0.82,
-            "top_p": 0.9,
+            **_chat_payload(),
         }
         t0 = time.perf_counter()
         base = _remote_base(url)
@@ -969,10 +1371,12 @@ class LLMEngine:
             )
         cleaned = _cleanup(text)
         last_user = next((m.get("content") or "" for m in reversed(history) if m.get("role") == "user"), "")
-        cleaned = _fix_reply(cleaned, last_user, history, city, name, gender)
+        cleaned = _fix_reply(cleaned, last_user, history, city, name, gender, nudge=nudge)
         elapsed = time.perf_counter() - t0
         logger.info("Удалённая генерация %.1f сек, символов: %s", elapsed, len(cleaned))
-        return cleaned or fallback_reply(last_user, name, gender, city)
+        if nudge:
+            return cleaned or fallback_nudge(city)
+        return cleaned or fallback_reply(last_user, name, gender, city, history)
 
     async def _remote_stream(
         self,

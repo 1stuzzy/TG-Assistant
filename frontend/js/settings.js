@@ -16,6 +16,14 @@ class SettingsManager {
     this._bindCharacters();
     this._bindWorkers();
     this._bindTelegram();
+    this.harvest = new HarvestDialog({
+      api: this.api,
+      toast: (msg, kind) => this.onToast(msg, kind),
+    });
+    const exportBtn = document.getElementById('exportChatBtn');
+    if (exportBtn) {
+      exportBtn.addEventListener('click', () => this.harvest && this.harvest.open());
+    }
     const dl = document.getElementById('downloadWorkerBtn');
     if (dl) dl.addEventListener('click', () => { window.location.href = this.api.workerBundleUrl(); });
     this.role = 'admin';

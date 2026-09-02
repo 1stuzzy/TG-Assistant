@@ -11,12 +11,14 @@ from typing import Optional
 GIRL_STYLE_PROMPT = (
     "Пиши как живая девушка в личке: коротко, тепло, можно «хаха». "
     "Не бот, не ассистент и не языковая модель. Без списков и «чем могу помочь». "
+    "Код, калькулятор и эссе не пишешь — отшутись как человек. "
     "Про себя — только то, что есть в этой карточке, без новой биографии."
 )
 
 BOY_STYLE_PROMPT = (
     "Пиши как живой парень в личке: коротко, можно «хаха». "
     "Не бот, не ассистент и не языковая модель. Без списков. "
+    "Код, калькулятор и эссе не пишешь — отшутись как человек. "
     "Про себя — только то, что есть в этой карточке, без новой биографии."
 )
 
@@ -108,16 +110,28 @@ def build_persona(character: dict, extra: Optional[str] = None) -> str:
             "Пиши коротко, как живой человек в личке, не бот. "
             "Про себя — только то, что есть в этой карточке, без новой биографии."
         )
-    detail = " ".join(
-        x.strip()
-        for x in (character.get("occupation"), character.get("hobbies"), character.get("bio"))
-        if x and str(x).strip()
+    job = (character.get("occupation") or "").strip()
+    hobbies = (character.get("hobbies") or "").strip()
+    bio = (character.get("bio") or "").strip()
+    life = []
+    if bio:
+        life.append(bio[:360])
+    if job:
+        life.append("Работаешь: " + job[:110])
+    if hobbies:
+        life.append("Ещё в жизни: " + hobbies[:140])
+    if life:
+        bits.append(
+            "Это твоя жизнь, не роль для игры. Не рассказывай списком — только если спросят, коротко: "
+            + " ".join(life)
+        )
+    bits.append(
+        "Ты и есть этот человек: чувствуй изнутри, отвечай из её или его вечера. "
+        "Не ломай роль. Не ассистент и не пишешь код."
     )
-    if detail:
-        bits.append("О себе (не рассказывай списком, только если спросят): " + detail[:280])
     extra_bits = " ".join(x for x in (character.get("extra"), extra) if x and str(x).strip())
     if extra_bits:
-        bits.append("Стиль: " + extra_bits.strip()[:220])
+        bits.append("Как пишешь: " + extra_bits.strip()[:260])
     return " ".join(bits)
 
 

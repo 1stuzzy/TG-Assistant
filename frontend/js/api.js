@@ -208,6 +208,22 @@ class ApiClient {
     return this._request('/api/logs');
   }
 
+  listAccountFolders(accountId) {
+    return this._request(`/api/accounts/${accountId}/folders`);
+  }
+
+  listAccountChats(accountId, folderId) {
+    const q = folderId ? `?folder_id=${encodeURIComponent(folderId)}` : '';
+    return this._request(`/api/accounts/${accountId}/chats${q}`);
+  }
+
+  importAccountChat(accountId, chatId) {
+    return this._request(`/api/accounts/${accountId}/chats/${encodeURIComponent(chatId)}/import`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  }
+
   stopAgent(accountId) {
     return this._request(`/api/accounts/${accountId}/agent/stop`, { method: 'POST' });
   }

@@ -22,4 +22,5 @@ remote-worker/runtime*/
 remote-worker/runtime-cpu/
 remote-worker/runtime-cuda/
 data/exports/
+data/rules/dialogues.live.jsonl
 

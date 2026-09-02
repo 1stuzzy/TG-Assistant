@@ -14,17 +14,15 @@ from typing import Optional
 
 from app.config import BASE_DIR, settings
 from app.services.character_store import is_female
-from app.services.world_context import clock as world_clock, wants_news, wants_time, wants_weather
+from app.services.world_context import clock as world_clock, wants_news, wants_now, wants_time, wants_weather, wants_day
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SUFFIX = (
-    "Живой диалог: коротко, как в личке, с реакцией. Можно хаха/ну/мм. "
-    "Сначала ответь на сказанное. За раз максимум один вопрос, своими словами, не анкетой. "
-    "Про себя — только из личности в этом промте, коротко и последовательно, "
-    "без списка фактов и без новой биографии. Это один чат с одним человеком. Не ассистент. "
-    "Эмоции по разговору: тяжело — мягко; шутка — можно ржать; коротко написал — не души. "
-    "Иногда достаточно реакции без вопроса."
+    "Живой диалог: коротко, как в личке. Сначала ответь на сказанное, не «ага». "
+    "В начале знакомства после ответа один живой вопрос. "
+    "Про себя — только из личности в этом промте. Это один чат с одним человеком. Не ассистент. "
+    "Эмоции по разговору: тяжело — мягко; шутка — можно ржать; коротко написал — не души."
 )
 
 _QUESTION = re.compile(r"[?？]|^(?i)\s*(а\s+)?(ты|как|что|чем|кто|где|когда|какой|какая|какие|зачем|почему)\b")
@@ -50,6 +48,32 @@ _ABOUT_SELF = re.compile(
 _NAME_ASK = re.compile(
     r"(?i)(как( тебя)? зовут|тво[её] имя|ты кто по имени)"
 )
+_NAME_BACK = re.compile(
+    r"(?i)(а тебя\s*\?*\s*$|а тебя как|а как тебя|тебя как зовут|а тво[её] имя)"
+)
+_ASK_BACK = re.compile(
+    r"(?i)(а ты как|как дела\s*\??\s*$|а ты\s*\??\s*$|как ты\s*\??\s*$)"
+)
+_LOOKING_FOR = re.compile(
+    r"(?i)("
+    r"кого ищешь|что ищешь|кого тут|"
+    r"зачем (ты )?(здесь|тут)|"
+    r"что (ты )?(тут|здесь) (ищешь|делаешь|забыл)|"
+    r"кого хочешь найти|для чего здесь"
+    r")"
+)
+_TASK_ASK = re.compile(
+    r"(?i)("
+    r"напиши(те)? (мне )?(код|скрипт|программ|калькулятор|бот|сайт|функци|парсер)|"
+    r"калькулятор|"
+    r"на python|на питоне|на javascript|"
+    r"```|"
+    r"реши (задач|пример|уравнен)|"
+    r"сделай домашк|"
+    r"сочини (эссе|сочинен|стих)|"
+    r"переведи (на англий|текст)"
+    r")"
+)
 _DAIVINCHIK = re.compile(
     r"(?i)("
     r"дайвинчик|давинчик|дай\s*винчик|винчик|"
@@ -60,8 +84,45 @@ _DAIVINCHIK = re.compile(
 )
 
 
-_PACK_MARKERS = ("human_rules.json", "topics.json", "emotions.json", "dialogues.jsonl", "slang.json")
-_FALLBACK_SHOTS = (("привет", "привет)"), ("ты бот?", "лол с чего"))
+_PACK_MARKERS = ("human_rules.json", "topics.json", "emotions.json", "dialogues.jsonl", "slang.json", "sepia.json")
+_FALLBACK_SHOTS = (("привет", "приветик, как день?"), ("ты бот?", "нет, с чего такие выводы"))
+_LIVE_NOISE = re.compile(
+    r"(?i)("
+    r"токен|бирж|nft|\bнфт\b|vpn|\bвпн\b|сбп|"
+    r"верификац|куратор|заявк|пополн|льгот|"
+    r"выве[дс]|вывод|баланс|закинул|замороз|"
+    r"сбер|озон|\bбанк\b|оплат|перевод|"
+    r"поддержк|продавц|выстав|куп(ил|ить|пи)|продаж|"
+    r"скриншот|скрин |/start|"
+    r"милана|крылов|"
+    r"североурал|талица|севыч|\bекб\b|екатеринбург|сибай|"
+    r"кружок|кружоч|поскидывай|фоточ|фотк|"
+    r"хирург|сперма|узбек|переводчик|"
+    r"пздц какой заботлив|"
+    r"\d+\s*(тыс|руб)|700к|\bайди\b|"
+    r"50 на 50|сессию заканч|кредит|"
+    r"деньг|закуп|аванс|покупаем|\bплюсе\b|"
+    r"зарплат|\bзп\b|продава|сумм[уыеа]|помощь твоя|"
+    r"расплатил|перевест|повысили|бизнесменш|"
+    r"фотографи|глазки|скинешь|инста|\bмоня\b|"
+    r"очень красив|бородой|технологии дошли|помог мне"
+    r")"
+)
+_GLUED_DAYS = re.compile(
+    r"(?i)(спокойной ночи|сладких снов).{6,}(доброе утро)|"
+    r"(доброе утро).{6,}(спокойной ночи)|"
+    r"(пойду спать).{6,}(доброе утро)"
+)
+_SHOT_GREET = re.compile(r"(?i)^[^\wа-яё]{0,6}(привет|приветик|здравств|доброе)")
+_LAZY_ASSISTANT = re.compile(
+    r"(?i)^("
+    r"да|нет|ок|окс|оки|ага|угу|ну|нуу+|онет|"
+    r"хаха|хех|ураа?|ждемс|отлично|хорошо|"
+    r"поняла\)*|спасибо\)*|спасибки|умничка|"
+    r"капец|согласна|странные"
+    r")\s*[).!]*$"
+)
+_SPACE = re.compile(r"\s+")
 
 
 def _has_pack(path: Path) -> bool:
@@ -99,7 +160,7 @@ def _pack_dir() -> Path:
     return (data_root / "rules").resolve()
 
 
-def _load_shots(path: Path, limit: int = 20) -> list[tuple[str, str]]:
+def _load_shots(path: Path, limit: int = 42) -> list[tuple[str, str]]:
     shots: list[tuple[str, str]] = []
     if not path.is_file():
         return shots
@@ -134,15 +195,76 @@ def _load_shots(path: Path, limit: int = 20) -> list[tuple[str, str]]:
     return shots
 
 
+LIVE_SHOT_LIMIT = 20
+CORE_SHOT_LIMIT = 50
+TOTAL_SHOT_LIMIT = 62
+
+
+def pack_dir() -> Path:
+    return _pack_dir()
+
+
+def reload_pack() -> None:
+    _pack.cache_clear()
+
+
+def style_shot_ok(user: str, assistant: str) -> bool:
+    user = _SPACE.sub(" ", (user or "").strip())
+    assistant = _SPACE.sub(" ", (assistant or "").strip())
+    if not (12 <= len(user) <= 90 and 12 <= len(assistant) <= 90):
+        return False
+    if re.fullmatch(r"[\d.,\s]+", user):
+        return False
+    blob = f"{user} {assistant}"
+    if _LIVE_NOISE.search(blob):
+        return False
+    if _GLUED_DAYS.search(user) or _GLUED_DAYS.search(assistant):
+        return False
+    if _SHOT_GREET.match(assistant) and not _SHOT_GREET.match(user):
+        return False
+    if _LAZY_ASSISTANT.match(assistant):
+        return False
+    if re.match(r"(?i)^оки\b", assistant):
+        return False
+    if assistant.count("?") > 1 or user.count("?") > 1:
+        return False
+    if blob.count("😁") + blob.count("😊") + blob.count("😅") + blob.count("🥰") + blob.count("😘") > 1:
+        return False
+    if re.search(r"(?i)https?://|t\.me/", blob):
+        return False
+    return True
+
+
+def _combined_shots(root: Path) -> list[tuple[str, str]]:
+    core = _load_shots(root / "dialogues.jsonl", limit=CORE_SHOT_LIMIT)
+    live = [
+        pair
+        for pair in _load_shots(root / "dialogues.live.jsonl", limit=400)
+        if style_shot_ok(pair[0], pair[1])
+    ][:LIVE_SHOT_LIMIT]
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str]] = []
+    for pair in (*core, *live):
+        key = (pair[0].casefold(), pair[1].casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(pair)
+        if len(out) >= TOTAL_SHOT_LIMIT:
+            break
+    return out
+
+
 @lru_cache(maxsize=1)
 def _pack() -> dict:
     root = _pack_dir()
     rules = _load_json(root / "human_rules.json", {})
+    sepia = _load_json(root / "sepia.json", {})
     emotions = _load_json(root / "emotions.json", {})
     topics_file = _load_json(root / "topics.json", {})
     slang = _load_json(root / "slang.json", {})
     sit_file = _load_json(root / "situations.json", {})
-    shots = _load_shots(root / "dialogues.jsonl")
+    shots = _combined_shots(root)
     compiled = []
     for item in emotions.get("rules") or []:
         try:
@@ -157,7 +279,13 @@ def _pack() -> dict:
             continue
     always = [str(x).strip() for x in (rules.get("always") or []) if str(x).strip()]
     never = [str(x).strip() for x in (rules.get("never") or []) if str(x).strip()]
-    suffix_bits = [(rules.get("system_suffix") or DEFAULT_SUFFIX).strip()]
+    never.extend(str(x).strip() for x in (sepia.get("never") or []) if str(x).strip())
+    never = list(dict.fromkeys(never))
+    suffix_bits = []
+    sepia_extra = (sepia.get("system_extra") or "").strip()
+    if sepia_extra:
+        suffix_bits.append(sepia_extra)
+    suffix_bits.append((rules.get("system_suffix") or DEFAULT_SUFFIX).strip())
     if always:
         suffix_bits.append("Важно: " + "; ".join(always) + ".")
     if never:
@@ -166,9 +294,10 @@ def _pack() -> dict:
     if glossary:
         suffix_bits.append(glossary)
     logger.info(
-        "Пакет диалога: %s (rules=%s topics=%s emotions=%s shots=%s slang=%s sit=%s)",
+        "Пакет диалога: %s (rules=%s sepia=%s topics=%s emotions=%s shots=%s slang=%s sit=%s)",
         root,
         bool(rules),
+        bool(sepia_extra or sepia.get("never")),
         len(topics_file.get("topics") or []),
         len(compiled),
         len(shots),
@@ -269,10 +398,10 @@ def _related(text: str, covered: set[str]) -> Optional[dict]:
 def _pick_topic(history: list[dict], last: str, mood: str) -> Optional[dict]:
     if mood in {"supportive", "tired", "cool", "annoyed"}:
         return None
-    if random.random() < 0.38:
-        return None
     turns = _user_turns(history)
     stage = _stage(turns)
+    if random.random() < (0.12 if stage == "ice" else 0.38):
+        return None
     covered = _covered(history)
     related = _related(last, covered)
     if related and (not related.get("heavy") or stage == "close"):
@@ -318,6 +447,34 @@ def _already_greeted(history: list[dict]) -> bool:
     return False
 
 
+def nudge_hint(
+    history: list[dict],
+    city: Optional[str] = None,
+    name: Optional[str] = None,
+) -> str:
+    bits = [
+        "Он замолчал в уже идущем чате. Напиши коротко сама, как человек в личке.",
+        "Не здоровайся. Не «ну что молчишь» и не «алло ты где». Не извиняйся что пропала.",
+        "Не отвечай заново на его старую фразу — это не новое сообщение.",
+    ]
+    last = _last_user(history)
+    if last and len(last) >= 8 and not _GREET_ONLY.match(last):
+        bits.append("Можно зацепить последнюю тему своими словами, без пересказа.")
+    who = (name or "").strip()
+    if who:
+        bits.append(f"Ты {who} из карточки, не ассистент.")
+    try:
+        part = world_clock(city).part
+    except Exception:
+        part = ""
+    if part == "ночь":
+        bits.append("Сейчас ночь — тише, без бодрого утра.")
+    elif part:
+        bits.append(f"Сейчас {part}.")
+    bits.append("Одна короткая реплика. Вопрос не обязателен.")
+    return " ".join(bits)
+
+
 def turn_hint(
     history: list[dict],
     last_user: Optional[str] = None,
@@ -361,12 +518,48 @@ def turn_hint(
         bits.append("Он про погоду. Одна короткая реплика из блока «сейчас», не сводка.")
         return " ".join(bits)
 
-    if _NAME_ASK.search(text):
+    if _TASK_ASK.search(text):
+        who = (name or "").strip()
+        bits.append(
+            "Он просит как у ChatGPT: код, калькулятор, эссе. Ты живой человек из промта"
+            + (f", тебя зовут {who}" if who else "")
+            + ". Не пиши код и не списки. Коротко отшутись и верни разговор в личку."
+        )
+        return " ".join(bits)
+
+    if _NAME_ASK.search(text) or _NAME_BACK.search(text):
         who = (name or "").strip() or "имя из промта"
         rod = "женском (рада, пошла)" if is_female(gender) else "мужском"
         bits.append(
-            f"Он спросил как зовут. Ответь коротко: {who}. О себе в {rod} роде. "
-            "Не модель, не Google, не Gemma. Не копируй подсказку."
+            f"Он спросил как тебя зовут. Ответь коротко своим именем: {who}. О себе в {rod} роде. "
+            "Не модель, не «умею отвечать на вопросы». Не копируй подсказку."
+        )
+        return " ".join(bits)
+
+    if _LOOKING_FOR.search(text):
+        bits.append(
+            "Он спросил кого или зачем ты здесь. Ответь из карточки коротко "
+            "(живой человек, познакомиться), и спроси его. Не «ага». Не эссе."
+        )
+        return " ".join(bits)
+
+    if _ASK_BACK.search(text):
+        prev = ""
+        for item in reversed(history or []):
+            if item.get("role") == "assistant":
+                prev = (item.get("content") or "").strip()
+                break
+        if _CITY_ASK.search(prev) or re.search(r"(?i)откуда", prev):
+            where = (city or "").strip() or "город из карточки"
+            bits.append(
+                f"Он назвал свой город и спросил тебя. Коротко скажи свой: {where}. "
+                "Не здоровайся, не представляйся чужим именем, не копируй примеры диалогов."
+            )
+            return " ".join(bits)
+        bits.append(
+            "Он ответил и спросил тебя то же. Сначала ответь про себя из карточки, "
+            "не «ага» и не одно «ну». Потом один короткий вопрос ему — прояви интерес. "
+            "Не копируй примеры."
         )
         return " ".join(bits)
 
@@ -374,17 +567,18 @@ def turn_hint(
         if greeted:
             bits.append("Уже поздоровались. Не пиши привет снова. Коротко отозвись, без представления.")
         else:
-            bits.append("Одно короткое приветствие, без точки в конце как у бота, без «как дела», без представления.")
+            bits.append("Одно короткое приветствие: приветик. Можно один живой вопрос — как день, как зовут. Не хай, без представления.")
         if part == "ночь":
             bits.append("Сейчас ночь — не пиши доброе утро.")
         return " ".join(bits)
 
     if _DAIVINCHIK.search(text):
         bits.append(
-            "Он про бот знакомств в телеге (дв/винчик). "
-            "Если это привет оттуда — коротко: тоже оттуда. "
-            "О себе в роде из промта: девушка — не «рад». "
-            "Не копируй эту подсказку. Не пиши «давай» просто так. Не про художника."
+            "Он про бот знакомств в телеге (дайвинчик/дв/винчик). "
+            "Это НЕ дайвинг, не ныряние, не спорт. Не пиши «круто нырять» и не про да винчи. "
+            "Если это привет оттуда — «приветик» и спроси давно ли там сидит. "
+            "Не пиши «тоже оттуда» и не «хай». Если спросил давно ли ты — недавно. "
+            "Не копируй подсказку."
         )
         if greeted:
             bits.append("Не здоровайся повторно.")
@@ -411,13 +605,28 @@ def turn_hint(
         )
         return " ".join(bits)
 
+    if wants_day(text):
+        bits.append(
+            "Он спросил чем была занята / как день. "
+            "1–2 бытовых факта из блока «сегодня» своими словами "
+            "(магазин, еда, работа — только то, что там есть). Не список. Не другой день. "
+            "Потом можно коротко спросить его."
+        )
+        return " ".join(bits)
+
+    if wants_now(text):
+        bits.append(
+            "Он спросил чем сейчас занята. Одна фраза из «сейчас» в блоке сегодня. "
+            "Не голое «в телефоне сижу», если там кухня, магазин или работа."
+        )
+        return " ".join(bits)
+
     if _HOW_ARE_YOU.search(text):
         if greeted:
             bits.append("Уже поздоровались секунду назад. ЗАПРЕЩЕНО писать привет/хай ещё раз.")
         bits.append(
-            "Он спросил как дела. Одна короткая фраза: «да норм» / «тоже ок». "
-            "Не выдумывай утро, работу, кошмары и распорядок, если этого нет в промте. "
-            "Максимум один короткий вопрос. Без абзаца, без 😊, без двух вопросов."
+            "Он спросил как дела. Коротко, можно одну деталь из блока «сегодня». "
+            "Не эссе и не кошмары. Максимум один короткий вопрос."
         )
         if part == "ночь":
             bits.append("Сейчас ночь — не рассказывай про рабочий день, не называй часы.")
@@ -434,26 +643,34 @@ def turn_hint(
     asked = _match_asked(text)
     if asked or _QUESTION.search(text):
         bits.append(
-            "Собеседник спросил тебя. Ответь коротко из личности в промте, "
-            "не выдумывай другую биографию и не перечисляй факты списком."
+            "Он спросил. Сначала ответь по сути из карточки, не «ага» и не одно «ну»."
         )
-        if mood not in {"supportive", "tired", "cool"} and random.random() < 0.55:
-            bits.append("Потом можно один встречный вопрос по теме, своими словами.")
+        ice = _stage(_user_turns(history)) == "ice"
+        if ice or mood not in {"supportive", "tired", "cool"}:
+            bits.append("Потом один живой вопрос ему по теме — прояви интерес, не допрос.")
         if greeted:
             bits.append("Не здоровайся повторно.")
         bits.append("Опирайся на память этого чата: не переспрашивай то, что он уже рассказывал.")
         return " ".join(bits)
 
     topic = _pick_topic(history, text, mood)
-    bits.append("Сначала живая реакция на его фразу, 1–2 коротких предложения.")
+    ice = _stage(_user_turns(history)) == "ice"
+    shape = random.choice(("ask", "ask", "react") if ice else ("react", "react", "cut", "ask"))
+    if shape == "cut":
+        bits.append("Одна короткая реакция, можно оборвать. Без вопроса и без вывода «главное».")
+    elif shape == "ask" and topic:
+        bits.append("Коротко отозвись на сказанное, не резюмируй.")
+        bits.append(_ask_hint(topic))
+    else:
+        bits.append("Короткая реакция на его фразу. Не объясняй смысл.")
+        if topic and (ice or random.random() < 0.55):
+            bits.append(_ask_hint(topic))
+        elif ice:
+            bits.append("Потом один короткий вопрос ему — прояви интерес.")
     if greeted:
         bits.append("Не пиши привет — вы уже поздоровались.")
     if part == "ночь":
         bits.append("Сейчас ночь: можно быть спокойнее, не бодрый дневной тон.")
-    if topic:
-        bits.append(_ask_hint(topic))
-    else:
-        bits.append("Вопрос не обязателен — можно просто отозваться.")
     bits.append("Не повторяй свой прошлый ответ. Не переспрашивай то, что он уже сказал.")
     bits.append("Опирайся на память этого чата. Про себя — только из промта.")
     return " ".join(bits)

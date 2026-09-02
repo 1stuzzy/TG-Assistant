@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import random
 import re
 import threading
 import time
@@ -309,15 +310,212 @@ def weather_line(city: Optional[str]) -> str:
     return text
 
 
-def snapshot(city: Optional[str], last_user: str = "") -> str:
+_JOB_IN_PERSONA = re.compile(
+    r"Работаешь:\s*(.+?)(?:\s+Ещё в жизни:|\s+Ты и есть|\s+Как пишешь:|$)",
+    re.S,
+)
+_HOB_IN_PERSONA = re.compile(
+    r"Ещё в жизни:\s*(.+?)(?:\s+Ты и есть|\s+Как пишешь:|$)",
+    re.S,
+)
+_DAY_ASK = re.compile(
+    r"(?i)("
+    r"чем\s+(ты\s+)?(сегодня\s+)?(занимал|занята|занят)|"
+    r"что\s+(ты\s+)?(сегодня\s+)?(делал|делала)|"
+    r"как\s+(у тебя\s+)?(прошёл|прошел)\s+день|"
+    r"как\s+(у тебя\s+)?день|"
+    r"какой\s+день|"
+    r"чем\s+сегодня"
+    r")"
+)
+_NOW_ASK = re.compile(
+    r"(?i)("
+    r"чем\s+(ты\s+)?(сейчас|щас|ща)?\s*(занимаешь|занята|занят)|"
+    r"что\s+(ты\s+)?(сейчас|щас|ща)\s+делаешь|"
+    r"а\s+что\s+ты\s+сейчас|"
+    r"а\s+ты\s+(сейчас|щас)\s+чем|"
+    r"чем\s+занимаешься"
+    r")"
+)
+
+
+def wants_day(text: str) -> bool:
+    return bool(_DAY_ASK.search(text or ""))
+
+
+def wants_now(text: str) -> bool:
+    return bool(_NOW_ASK.search(text or ""))
+
+
+def _life_from_persona(persona: Optional[str]) -> tuple[str, str]:
+    text = persona or ""
+    job = hob = ""
+    found = _JOB_IN_PERSONA.search(text)
+    if found:
+        job = re.sub(r"\s+", " ", found.group(1)).strip()[:120]
+    found = _HOB_IN_PERSONA.search(text)
+    if found:
+        hob = re.sub(r"\s+", " ", found.group(1)).strip()[:140]
+    return job, hob
+
+
+def _girl_voice(gender: Optional[str], persona: Optional[str]) -> bool:
+    g = (gender or "").strip().lower()
+    if g in {"male", "boy", "м", "парень", "муж", "m"}:
+        return False
+    if g in {"female", "girl", "ж", "девушка", "жен", "f"}:
+        return True
+    return "ты парень" not in (persona or "").lower()
+
+
+def _job_kind(occupation: str) -> str:
+    text = (occupation or "").lower()
+    if any(key in text for key in ("дизайн", "удалён", "удален", "графич")):
+        return "remote"
+    if "фото" in text:
+        return "photo"
+    if "бармен" in text or "бар" in text:
+        return "bar"
+    if "кофе" in text:
+        return "cafe"
+    if "цвет" in text:
+        return "flowers"
+    return "misc"
+
+
+def _pick(rng: random.Random, options: list[str]) -> str:
+    clean = [item for item in options if item]
+    return rng.choice(clean) if clean else "дома"
+
+
+def today_beats(
+    city: Optional[str] = None,
+    occupation: str = "",
+    hobbies: str = "",
+    gender: Optional[str] = None,
+    persona: Optional[str] = None,
+) -> tuple[str, str]:
+    """Один стабильный быт на календарный день: (уже было, сейчас)."""
+    clk = clock(city)
+    girl = _girl_voice(gender, persona)
+    if not occupation or not hobbies:
+        job, hob = _life_from_persona(persona)
+        occupation = occupation or job
+        hobbies = hobbies or hob
+    rng = random.Random(f"{clk.date_line}|{clk.city}|{occupation[:48]}|{hobbies[:48]}")
+    hour = clk.now.hour
+    weekend = clk.weekday in {"суббота", "воскресенье"}
+    kind = _job_kind(occupation)
+    hob = (hobbies or "").lower()
+    cat = "кот" in hob or "муся" in hob or "барсик" in hob
+    cook = any(key in hob for key in ("готов", "паст", "рамён", "рамен"))
+    series = "сериал" in hob
+    yoga = "йога" in hob
+    swim = "бассейн" in hob or "басейн" in hob
+    coffee = "кофе" in hob
+    weather = weather_line(clk.city or city).lower()
+    wet = any(word in weather for word in ("дожд", "ливень", "снег"))
+
+    went = "ходила" if girl else "ходил"
+    sat = "сидела" if girl else "сидел"
+    got = "съездила" if girl else "съездил"
+
+    work_past = {
+        "remote": [f"утром в макетах {sat}", "заказчику правки кидала" if girl else "заказчику правки кидал"],
+        "photo": ["утром съёмка была", "дома фото чистила" if girl else "дома фото чистил"],
+        "bar": ["днём ещё дома была" if girl else "днём ещё дома был"],
+        "cafe": ["смена в кофейне была", f"в кофейне {sat}"],
+        "flowers": ["в цветочном выручала" if girl else "в цветочном выручал"],
+        "misc": [f"по работе {sat}", "дела были"],
+    }[kind]
+    work_now = {
+        "remote": ["ещё в файлах копаюсь", "глаз уже мылит от экрана", "ноут открыт, доделываю"],
+        "photo": ["дома фото разгребаю", "в телефоне кадры смотрю"],
+        "bar": ["дома ещё, смена позже", "собираюсь на смену"],
+        "cafe": ["с смены только", "ещё чуть на смене"],
+        "flowers": ["с цветочного только", "ещё там крутилась" if girl else "ещё там крутился"],
+        "misc": ["ещё по делам", "ща дома уже"],
+    }[kind]
+    shop = [
+        f"в магазин {went}, продуктов набрала" if girl else f"в магазин {went}, продуктов набрал",
+        f"за хлебом {got} и молоком",
+        "в магазин сгоняла" if girl else "в магазин сгонял",
+    ]
+    cook_now = ["сейчас готовить буду", "ща на кухне, ужин", "кастрюля уже стоит"]
+    home_now = [
+        "дома, в телефоне",
+        "с котом валяюсь" if cat else "дома лежу",
+        ("сериал включила" if girl else "сериал включил") if series else "дома",
+    ]
+    morning_now = [
+        "кофе пью",
+        "ещё не раскачалась" if girl else "ещё не раскачался",
+        "с бассейна только" if swim else "",
+        "кофе дома пью" if coffee or wet else "с кофе гуляю" if coffee else "",
+        "на йоге была" if yoga and girl else "",
+    ]
+    if hour < 8:
+        past = _pick(rng, ["плохо спалось", "только встала" if girl else "только встал"])
+        now = _pick(rng, morning_now)
+    elif hour < 12:
+        past = _pick(rng, morning_now + (["на йоге была"] if yoga and girl else []))
+        now = _pick(rng, work_now if not weekend else morning_now + home_now)
+    elif hour < 17:
+        past = _pick(rng, work_past if not weekend else shop)
+        now = _pick(rng, home_now if wet else (work_now if not weekend else shop[:1] + home_now))
+    elif hour < 22:
+        past = _pick(rng, shop if rng.random() < 0.65 else work_past)
+        now = _pick(rng, cook_now if (cook or rng.random() < 0.7) else home_now)
+    else:
+        past = _pick(rng, shop + (["дома ужинала" if girl else "дома ужинал"]))
+        now = _pick(rng, [
+            "уже валяюсь с чаем",
+            "сериал досматриваю" if series else "в телефоне ещё",
+            "с котом на диване" if cat else "дома тихо",
+        ])
+    return past, now
+
+
+def today_block(
+    city: Optional[str] = None,
+    persona: Optional[str] = None,
+    gender: Optional[str] = None,
+) -> str:
+    past, now = today_beats(city, gender=gender, persona=persona)
+    return (
+        f"Сегодня у тебя: {past}. Сейчас: {now}. "
+        "Если спросят про день или чем занята — своими словами из этого, не список и не другой день."
+    )
+
+
+def spoken_today(
+    city: Optional[str] = None,
+    persona: Optional[str] = None,
+    gender: Optional[str] = None,
+    kind: str = "day",
+) -> str:
+    past, now = today_beats(city, gender=gender, persona=persona)
+    if kind == "now":
+        return now
+    if past.lower() in now.lower() or now.lower() in past.lower():
+        return now
+    return f"{past}, {now}"
+
+
+def snapshot(
+    city: Optional[str],
+    last_user: str = "",
+    persona: Optional[str] = None,
+    gender: Optional[str] = None,
+) -> str:
     clk = clock(city)
     where = clk.city or "твой город"
     bits = [
         (
-            f"Сейчас: {clk.weekday}, {clk.date_line}, {clk.time_line}, {clk.part}, {where}. "
-            f"{clk.part_hint.capitalize()}. "
-            "Не называй дату и точные часы, если не спросили. Живи в этом моменте."
-        )
+            f"Сейчас: {clk.weekday}, {clk.part}, {where}. {clk.part_hint.capitalize()}. "
+            "Не называй дату и точные часы, если не спросили."
+        ),
+        today_block(city, persona, gender),
     ]
     if wants_news(last_user):
         heads = news_headlines()

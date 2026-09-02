@@ -7,16 +7,17 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 
 from app.auth import admin_user, current_user, require_account, accounts_for, require_tenant_writable
-from app.deps import agents, catalog, characters, llm, rental, store, telegram, workers
+from app.deps import agents, catalog, characters, harvest, llm, rental, store, telegram, workers
 from app.models.account import Account
 from app.services.agent_manager import REPLY_FOLDER_TITLE
 from app.schemas import (
     AgentStartRequest,
     CharacterPayload,
+    DialogImportRequest,
     ConfirmCodeRequest,
     ConfirmCodeResponse,
     ConfirmPasswordRequest,
@@ -199,6 +200,43 @@ async def agent_status(account_id: str, user: dict = Depends(current_user)):
     if user["role"] != "admin":
         return _hide_model_fields(snap)
     return snap
+
+
+@router.get("/accounts/{account_id}/folders")
+async def list_account_folders(account_id: str, _: dict = Depends(admin_user)):
+    require_account(account_id, _)
+    try:
+        return await harvest.list_folders(account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/accounts/{account_id}/chats")
+async def list_account_chats(
+    account_id: str,
+    folder_id: str | None = Query(default=None),
+    _: dict = Depends(admin_user),
+):
+    require_account(account_id, _)
+    try:
+        return await harvest.list_chats(account_id, folder_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/accounts/{account_id}/chats/{chat_id}/import")
+async def import_account_chat(
+    account_id: str,
+    chat_id: str,
+    payload: DialogImportRequest | None = None,
+    _: dict = Depends(admin_user),
+):
+    require_account(account_id, _)
+    body = payload or DialogImportRequest()
+    try:
+        return await harvest.import_chat(account_id, chat_id, body.max_pairs)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/models")

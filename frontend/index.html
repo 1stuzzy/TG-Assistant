@@ -6,7 +6,7 @@
   <title>TG Manager — управление аккаунтами Telegram</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=1.4.8">
+  <link rel="stylesheet" href="css/styles.css?v=1.4.10">
 
 </head>
 <body>
@@ -313,6 +313,11 @@
             </div>
           </div>
         </div>
+        <div class="settings-card admin-only harvest-card">
+          <h3>Выгрузить чат</h3>
+          <p class="desc">Выберите папку на аккаунте (например «Парсинг») и чат внутри неё. Выгружается весь текст, фото и аудио пропускаются.</p>
+          <button class="btn btn-primary" type="button" id="exportChatBtn">Выгрузить чат</button>
+        </div>
       </div>
 
       <div class="settings-panel" id="panelSystem">
@@ -544,15 +549,34 @@
   </div>
 </div>
 
+<div class="overlay" id="harvestOverlay">
+  <div class="modal harvest-modal">
+    <div class="modal-head">
+      <h2 id="harvestTitle">Выгрузить чат</h2>
+      <button class="close-x" id="harvestCloseBtn" type="button">✕</button>
+    </div>
+    <p class="modal-sub" id="harvestSub">Сначала папка на аккаунте, затем чат. Весь текст уйдёт в примеры, фото и аудио пропускаются.</p>
+    <div class="error-text" id="errHarvest"></div>
+    <div class="field" id="harvestSearchWrap" hidden>
+      <input class="text-input" id="harvestSearch" placeholder="Поиск папки или чата" autocomplete="off">
+    </div>
+    <div id="harvestBody" class="harvest-body"></div>
+    <div class="modal-footer" id="harvestFooter" hidden>
+      <button class="btn btn-ghost" type="button" id="harvestBackBtn">Назад</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="js/api.js?v=1.4.8"></script>
-<script src="js/accounts.js?v=1.4.8"></script>
-<script src="js/wizard.js?v=1.4.8"></script>
-<script src="js/settings.js?v=1.4.8"></script>
-<script src="js/tenants.js?v=1.4.8"></script>
-<script src="js/console.js?v=1.4.8"></script>
-<script src="js/app.js?v=1.4.8"></script>
+<script src="js/api.js?v=1.4.10"></script>
+<script src="js/harvest.js?v=1.4.10"></script>
+<script src="js/accounts.js?v=1.4.10"></script>
+<script src="js/wizard.js?v=1.4.10"></script>
+<script src="js/settings.js?v=1.4.10"></script>
+<script src="js/tenants.js?v=1.4.10"></script>
+<script src="js/console.js?v=1.4.10"></script>
+<script src="js/app.js?v=1.4.10"></script>
 
 </body>
 </html>
