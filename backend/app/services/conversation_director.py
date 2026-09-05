@@ -14,7 +14,16 @@ from typing import Optional
 
 from app.config import BASE_DIR, settings
 from app.services.character_store import is_female
-from app.services.world_context import clock as world_clock, wants_news, wants_now, wants_time, wants_weather, wants_day
+from app.services.world_context import (
+    clock as world_clock,
+    wants_news,
+    wants_now,
+    wants_show,
+    wants_time,
+    wants_weather,
+    wants_day,
+    watching_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +41,10 @@ _HOW_ARE_YOU = re.compile(
     r"(?i)("
     r"(?<![а-яё])ты как(?!\s*-?\s*то\b)(?!\s+странн)"
     r"|как ты(?!\s+странн)(?!\s+себя)"
-    r"|как дела|как делишки|\bделишки\b|"
-    r"чё как|че как|как самочувствие|как жизнь|\bкак оно\b"
+    r"|как тебе\b|и как тебе|ну как тебе|"
+    r"как дела|как делишки|\bделишки\b|"
+    r"чё как|че как|как самочувствие|как жизнь|\bкак оно\b|"
+    r"и как\s*\??\s*$|ну как\s*\??\s*$"
     r")"
 )
 _GET_ACQ = re.compile(
@@ -72,6 +83,13 @@ _TASK_ASK = re.compile(
     r"сделай домашк|"
     r"сочини (эссе|сочинен|стих)|"
     r"переведи (на англий|текст)"
+    r")"
+)
+_SHOW_ASK = re.compile(
+    r"(?i)("
+    r"какой сериал|какую сери[юи]|что за сериал|"
+    r"какой смотришь|что смотришь|"
+    r"какой фильм|что за фильм"
     r")"
 )
 _DAIVINCHIK = re.compile(
@@ -195,9 +213,9 @@ def _load_shots(path: Path, limit: int = 42) -> list[tuple[str, str]]:
     return shots
 
 
-LIVE_SHOT_LIMIT = 20
-CORE_SHOT_LIMIT = 50
-TOTAL_SHOT_LIMIT = 62
+LIVE_SHOT_LIMIT = 6
+CORE_SHOT_LIMIT = 14
+TOTAL_SHOT_LIMIT = 18
 
 
 def pack_dir() -> Path:
@@ -316,13 +334,43 @@ def _pack() -> dict:
     }
 
 
+COMPACT_SUFFIX = (
+    "Пиши как в личке: живо и свободно, по ситуации. Сначала ответь на сказанное. "
+    "Биография и характер из карточки — сама решай тон и длину, не прячься за «мм» и «обычная жизнь». "
+    "Можно шутить, быть прямой, чуть дерзкой. "
+    "Жёстко: дайвинчик / дв / винчик / лео — только бот знакомств в Telegram. "
+    "Это НЕ дайвинг, НЕ плавание, НЕ ныряние, НЕ спорт и НЕ Леонардо да Винчи. "
+    "Запрещено писать «дайвинг классный», «сколько плавала», «нырять». "
+    "Не здоровайся второй раз. Не ассистент. "
+    "Если спросят про себя / работу / хобби — ответь из карточки по-человечески. "
+    "Сериал — название из блока сегодня или карточки."
+)
+
+
+def prompt_compact() -> bool:
+    return (settings.llm_prompt_mode or "compact").strip().lower() != "full"
+
+
 def human_suffix() -> str:
+    if prompt_compact():
+        gloss = ""
+        try:
+            slang = _load_json(_pack_dir() / "slang.json", {})
+            gloss = (slang.get("glossary") or "").strip()
+        except Exception:
+            gloss = ""
+        if gloss:
+            return COMPACT_SUFFIX + " " + gloss
+        return COMPACT_SUFFIX
     return _pack()["suffix"]
 
 
 def dialogue_shots() -> tuple[tuple[str, str], ...]:
-    shots = _pack().get("shots") or []
-    return tuple(shots) if shots else _FALLBACK_SHOTS
+    n = max(0, int(getattr(settings, "llm_few_shots", 0) or 0))
+    if n == 0:
+        return ()
+    shots = list(_pack().get("shots") or _FALLBACK_SHOTS)
+    return tuple(shots[:n])
 
 
 def _last_user(history: list[dict]) -> str:
@@ -481,6 +529,7 @@ def turn_hint(
     city: Optional[str] = None,
     name: Optional[str] = None,
     gender: Optional[str] = None,
+    persona: Optional[str] = None,
 ) -> str:
     text = (last_user if last_user is not None else _last_user(history)).strip()
     mood = _mood(text)
@@ -518,6 +567,15 @@ def turn_hint(
         bits.append("Он про погоду. Одна короткая реплика из блока «сейчас», не сводка.")
         return " ".join(bits)
 
+    if wants_show(text) or _SHOW_ASK.search(text):
+        show = watching_title(city, persona, gender) or ""
+        named = f"Назови «{show}»" if show else "Назови сериал из блока «сегодня»"
+        bits.append(
+            f"Он спросил что смотришь. {named}, одно название. "
+            "Не «сериалы вообще» и не уходи в фото/йогу. Потом можно спросить его детектив."
+        )
+        return " ".join(bits)
+
     if _TASK_ASK.search(text):
         who = (name or "").strip()
         bits.append(
@@ -552,8 +610,18 @@ def turn_hint(
         if _CITY_ASK.search(prev) or re.search(r"(?i)откуда", prev):
             where = (city or "").strip() or "город из карточки"
             bits.append(
-                f"Он назвал свой город и спросил тебя. Коротко скажи свой: {where}. "
-                "Не здоровайся, не представляйся чужим именем, не копируй примеры диалогов."
+                f"Он назвал свой город и спросил тебя. Коротко скажи только свой: {where}. "
+                "Не переспрашивай «а ты откуда» — он уже сказал. "
+                "Не копируй его город как свой, если у тебя другой. Не здоровайся."
+            )
+            return " ".join(bits)
+        blob = " ".join((item.get("content") or "") for item in (history or []))
+        if _DAIVINCHIK.search(blob) or _DAIVINCHIK.search(prev):
+            bits.append(
+                "Он спросил тебя после разговора про дайвинчик (бот знакомств). "
+                "Ответь про себя: недавно тут / ещё осваиваюсь. "
+                "ЗАПРЕЩЕНО: дайвинг, плавание, ныряние, «сколько плавала». "
+                "Это не спорт. Потом один короткий вопрос ему."
             )
             return " ".join(bits)
         bits.append(
@@ -584,6 +652,17 @@ def turn_hint(
             bits.append("Не здоровайся повторно.")
         return " ".join(bits)
 
+    if re.search(
+        r"(?i)^(что\s+давно|в\s+смысле|о\s*ч[её]м|про\s+что|что\s+ты\s+(имеешь|спросил)|уточни)\s*[?？!.…)]*\s*$",
+        text,
+    ):
+        bits.append(
+            "Он не понял твой прошлый вопрос и просит уточнить. "
+            "Поясни свой вопрос коротко (например: спрашиваю тебя — давно тут сидишь?), "
+            "НЕ отвечай про себя («пару дней как тут»). Не копируй подсказку."
+        )
+        return " ".join(bits)
+
     if _GET_ACQ.search(text):
         bits.append(
             "Он предлагает познакомиться. Коротко согласись («давай» / «ну давай»), "
@@ -600,8 +679,9 @@ def turn_hint(
 
     if _ABOUT_SELF.search(text):
         bits.append(
-            "Он просит рассказать о себе. Одна-две короткие фразы из карточки в промте. "
-            "Не говори про обучение, развитие и нейросеть. Если в промте мало фактов — коротко и спроси его."
+            "Он просит рассказать о себе. Ответь живее из карточки: кто ты, чем живёшь "
+            "(работа, город, 1–2 детали). Не «обычная жизнь», не список-резюме. Можно 2–3 фразы. "
+            "Не говори про обучение нейросети. Если фактов мало — коротко и спроси его."
         )
         return " ".join(bits)
 
@@ -624,10 +704,18 @@ def turn_hint(
     if _HOW_ARE_YOU.search(text):
         if greeted:
             bits.append("Уже поздоровались секунду назад. ЗАПРЕЩЕНО писать привет/хай ещё раз.")
-        bits.append(
-            "Он спросил как дела. Коротко, можно одну деталь из блока «сегодня». "
-            "Не эссе и не кошмары. Максимум один короткий вопрос."
-        )
+        blob = " ".join((item.get("content") or "") for item in (history or []))
+        if _DAIVINCHIK.search(blob):
+            bits.append(
+                "Разговор про дайвинчик (бот знакомств). На «как тебе» ответь коротко и по-человечески "
+                "(норм / пока ок), спроси его. Не восхищайся ботом («космос», «огонь»), "
+                "не пиши «новенькая», «с удовольствием», не про плавание."
+            )
+        else:
+            bits.append(
+                "Он спросил как дела. Коротко, можно одну деталь из блока «сегодня» "
+                "или из карточки. Не эссе и не «с удовольствием»."
+            )
         if part == "ночь":
             bits.append("Сейчас ночь — не рассказывай про рабочий день, не называй часы.")
         elif part:

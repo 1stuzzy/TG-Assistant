@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -11,6 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
@@ -339,6 +341,101 @@ _NOW_ASK = re.compile(
 )
 
 
+_TITLE_MARK = re.compile(r"[«\"“]([^»\"”]{2,42})[»\"”]")
+_SHOWS_LINE = re.compile(
+    r"(?i)сериал(?:ы|ов)?\s*[:—-]\s*(.+?)(?:\.|;|$)",
+)
+_SHOW_ASK = re.compile(
+    r"(?i)("
+    r"какой\s+сериал|какую\s+сери[юи]|что\s+за\s+сериал|"
+    r"какой\s+смотришь|что\s+смотришь|"
+    r"какой\s+фильм|что\s+за\s+фильм|"
+    r"досматриваешь|досматриваю"
+    r")"
+)
+_DEFAULT_SHOWS_GIRL = (
+    "Пингвин",
+    "Белый лотос",
+    "Эйфория",
+    "Дрянь",
+    "Одни из нас",
+    "Метод",
+    "Вампиры средней полосы",
+)
+_DEFAULT_SHOWS_BOY = (
+    "Пингвин",
+    "Одни из нас",
+    "Во все тяжкие",
+    "Настоящий детектив",
+    "Метод",
+)
+
+
+def wants_show(text: str) -> bool:
+    return bool(_SHOW_ASK.search(text or ""))
+
+
+def _taste_shows(girl: bool) -> tuple[str, ...]:
+    path = Path(settings.conversation_pack_dir) / "taste.json"
+    try:
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            key = "girl_shows" if girl else "boy_shows"
+            rows = [str(x).strip() for x in (data.get(key) or []) if str(x).strip()]
+            if rows:
+                return tuple(rows)
+    except (OSError, json.JSONDecodeError, TypeError):
+        logger.debug("Не прочитан taste.json", exc_info=True)
+    return _DEFAULT_SHOWS_GIRL if girl else _DEFAULT_SHOWS_BOY
+
+
+def _titles_from_text(text: str) -> list[str]:
+    blob = text or ""
+    found: list[str] = []
+    for hit in _TITLE_MARK.findall(blob):
+        title = re.sub(r"\s+", " ", hit).strip(" .,-")
+        if 2 <= len(title) <= 42:
+            found.append(title)
+    line = _SHOWS_LINE.search(blob)
+    if line:
+        for part in re.split(r"\s*,\s*|\s+и\s+", line.group(1)):
+            title = part.strip(" .,-«»\"'")
+            if 2 <= len(title) <= 42:
+                found.append(title)
+    out: list[str] = []
+    seen: set[str] = set()
+    for title in found:
+        key = title.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(title)
+    return out
+
+
+def watching_title(
+    city: Optional[str] = None,
+    persona: Optional[str] = None,
+    gender: Optional[str] = None,
+    occupation: str = "",
+    hobbies: str = "",
+) -> str:
+    clk = clock(city)
+    girl = _girl_voice(gender, persona)
+    if not occupation or not hobbies:
+        job, hob = _life_from_persona(persona)
+        occupation = occupation or job
+        hobbies = hobbies or hob
+    blob = f"{hobbies or ''} {persona or ''}"
+    pool = _titles_from_text(blob)
+    if not pool and "сериал" in blob.lower():
+        pool = list(_taste_shows(girl))
+    if not pool:
+        return ""
+    rng = random.Random(f"{clk.date_line}|{clk.city}|{occupation[:48]}|{hobbies[:48]}|show")
+    return rng.choice(pool)
+
+
 def wants_day(text: str) -> bool:
     return bool(_DAY_ASK.search(text or ""))
 
@@ -355,7 +452,7 @@ def _life_from_persona(persona: Optional[str]) -> tuple[str, str]:
         job = re.sub(r"\s+", " ", found.group(1)).strip()[:120]
     found = _HOB_IN_PERSONA.search(text)
     if found:
-        hob = re.sub(r"\s+", " ", found.group(1)).strip()[:140]
+        hob = re.sub(r"\s+", " ", found.group(1)).strip()[:240]
     return job, hob
 
 
@@ -370,6 +467,8 @@ def _girl_voice(gender: Optional[str], persona: Optional[str]) -> bool:
 
 def _job_kind(occupation: str) -> str:
     text = (occupation or "").lower()
+    if any(key in text for key in ("сбер", "финанс", "аналитик", "банк", "офис", "эксел")):
+        return "office"
     if any(key in text for key in ("дизайн", "удалён", "удален", "графич")):
         return "remote"
     if "фото" in text:
@@ -410,9 +509,12 @@ def today_beats(
     cat = "кот" in hob or "муся" in hob or "барсик" in hob
     cook = any(key in hob for key in ("готов", "паст", "рамён", "рамен"))
     series = "сериал" in hob
+    show = watching_title(city, persona, gender, occupation, hobbies)
     yoga = "йога" in hob
     swim = "бассейн" in hob or "басейн" in hob
     coffee = "кофе" in hob
+    nft = any(key in hob for key in ("nft", "opensea", "getgems", "токен"))
+    gym = "зал" in hob
     weather = weather_line(clk.city or city).lower()
     wet = any(word in weather for word in ("дожд", "ливень", "снег"))
 
@@ -421,6 +523,11 @@ def today_beats(
     got = "съездила" if girl else "съездил"
 
     work_past = {
+        "office": [
+            f"утром на созвоне {sat}",
+            f"в экселе {sat}",
+            "отчёт гоняла" if girl else "отчёт гонял",
+        ],
         "remote": [f"утром в макетах {sat}", "заказчику правки кидала" if girl else "заказчику правки кидал"],
         "photo": ["утром съёмка была", "дома фото чистила" if girl else "дома фото чистил"],
         "bar": ["днём ещё дома была" if girl else "днём ещё дома был"],
@@ -429,6 +536,7 @@ def today_beats(
         "misc": [f"по работе {sat}", "дела были"],
     }[kind]
     work_now = {
+        "office": ["ещё в таблицах", "с офиса только", "ноут закрыла, дома уже" if girl else "ноут закрыл, дома уже"],
         "remote": ["ещё в файлах копаюсь", "глаз уже мылит от экрана", "ноут открыт, доделываю"],
         "photo": ["дома фото разгребаю", "в телефоне кадры смотрю"],
         "bar": ["дома ещё, смена позже", "собираюсь на смену"],
@@ -441,11 +549,18 @@ def today_beats(
         f"за хлебом {got} и молоком",
         "в магазин сгоняла" if girl else "в магазин сгонял",
     ]
+    # Для офиса/удалёнки магазин — редкий фон, не основной «день»
+    shop_chance = 0.18 if kind in {"office", "remote"} else 0.65
     cook_now = ["сейчас готовить буду", "ща на кухне, ужин", "кастрюля уже стоит"]
     home_now = [
         "дома, в телефоне",
         "с котом валяюсь" if cat else "дома лежу",
-        ("сериал включила" if girl else "сериал включил") if series else "дома",
+        (f"«{show}» включила" if girl else f"«{show}» включил") if show else (
+            ("сериал включила" if girl else "сериал включил") if series else "дома"
+        ),
+        "в OpenSea сижу" if nft else "",
+        "лот проверяю" if nft else "",
+        "с зала только" if gym else "",
     ]
     morning_now = [
         "кофе пью",
@@ -461,17 +576,20 @@ def today_beats(
         past = _pick(rng, morning_now + (["на йоге была"] if yoga and girl else []))
         now = _pick(rng, work_now if not weekend else morning_now + home_now)
     elif hour < 17:
-        past = _pick(rng, work_past if not weekend else shop)
-        now = _pick(rng, home_now if wet else (work_now if not weekend else shop[:1] + home_now))
+        past = _pick(rng, work_past if not weekend else (shop if kind == "misc" else home_now + work_past))
+        now = _pick(rng, home_now if wet else (work_now if not weekend else home_now))
     elif hour < 22:
-        past = _pick(rng, shop if rng.random() < 0.65 else work_past)
-        now = _pick(rng, cook_now if (cook or rng.random() < 0.7) else home_now)
+        past = _pick(rng, shop if rng.random() < shop_chance else work_past)
+        now = _pick(rng, cook_now if cook else home_now)
     else:
-        past = _pick(rng, shop + (["дома ужинала" if girl else "дома ужинал"]))
+        past = _pick(rng, (work_past if kind in {"office", "remote"} else shop) + (
+            ["дома ужинала" if girl else "дома ужинал"]
+        ))
         now = _pick(rng, [
             "уже валяюсь с чаем",
-            "сериал досматриваю" if series else "в телефоне ещё",
+            (f"досматриваю «{show}»" if show else "сериал досматриваю") if series else "в телефоне ещё",
             "с котом на диване" if cat else "дома тихо",
+            "ещё в OpenSea торчу" if nft else "",
         ])
     return past, now
 
@@ -482,8 +600,15 @@ def today_block(
     gender: Optional[str] = None,
 ) -> str:
     past, now = today_beats(city, gender=gender, persona=persona)
+    show = watching_title(city, persona, gender)
+    extra = ""
+    if show:
+        extra = (
+            f" Сейчас смотришь «{show}». Если спросят какой сериал или что по телеку — "
+            "назови это название, не общее слово «сериалы» и не другое шоу."
+        )
     return (
-        f"Сегодня у тебя: {past}. Сейчас: {now}. "
+        f"Сегодня у тебя: {past}. Сейчас: {now}.{extra} "
         "Если спросят про день или чем занята — своими словами из этого, не список и не другой день."
     )
 

@@ -228,6 +228,22 @@ class ApiClient {
     return this._request(`/api/accounts/${accountId}/agent/stop`, { method: 'POST' });
   }
 
+  dialogHistory(accountId) {
+    return this._request(`/api/accounts/${accountId}/dialog-history`);
+  }
+
+  modelLogs(accountId) {
+    const q = accountId ? `?account_id=${encodeURIComponent(accountId)}` : '';
+    return this._request(`/api/model-logs${q}`);
+  }
+
+  testLlm(payload) {
+    return this._request('/api/llm/test', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
   uploadModel(file, onProgress) {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();

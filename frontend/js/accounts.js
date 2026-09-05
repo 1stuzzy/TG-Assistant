@@ -5,7 +5,7 @@
 class AccountsView {
   static COLORS = ['#5aaec6', '#5aad78', '#c9a45a', '#8b7cc9', '#d07070', '#5ab8a8'];
 
-  constructor({ api, gridEl, searchEl, statTotalEl, statActiveEl, statInactiveEl, statAgentsEl, toast, onStartAgent }) {
+  constructor({ api, gridEl, searchEl, statTotalEl, statActiveEl, statInactiveEl, statAgentsEl, toast, onStartAgent, onHistory }) {
     this.api = api;
     this.gridEl = gridEl;
     this.searchEl = searchEl;
@@ -15,6 +15,7 @@ class AccountsView {
     this.statAgentsEl = statAgentsEl;
     this.toast = toast;
     this.onStartAgent = onStartAgent;
+    this.onHistory = onHistory;
 
     this.accounts = [];
 
@@ -80,10 +81,13 @@ class AccountsView {
     const btn = e.target.closest('[data-action]');
     if (!btn) return;
     const id = btn.closest('[data-id]').dataset.id;
+    const acc = this.accounts.find((a) => a.id === id);
+    const accName = acc ? `${acc.name} ${acc.phone}` : id;
     if (btn.dataset.action === 'check') this.checkAccount(id);
     if (btn.dataset.action === 'delete') this.deleteAccount(id);
     if (btn.dataset.action === 'agent-start' && this.onStartAgent) this.onStartAgent(id);
     if (btn.dataset.action === 'agent-stop') this.stopAgent(id);
+    if (btn.dataset.action === 'history' && this.onHistory) this.onHistory(id, accName);
   }
 
   async stopAgent(id) {
@@ -143,13 +147,6 @@ class AccountsView {
     const pending = agent && agent.pending != null
       ? Number(agent.pending) || 0
       : Math.max(0, received - processed);
-    const typing = (agent && agent.typing_text) ? String(agent.typing_text).trim() : '';
-    let typingLabel = '—';
-    if (running && agent.status === 'generating') {
-      typingLabel = typing || '…';
-    } else if (typing) {
-      typingLabel = typing;
-    }
     const scriptCls = running ? 'on' : 'off';
     const scriptLabel = running ? 'активен' : 'неактивен';
     return `
@@ -159,7 +156,6 @@ class AccountsView {
         <div class="account-stat"><span>Обработано сообщений</span><b>${processed}</b></div>
         <div class="account-stat"><span>Отвечено</span><b>${replies}</b></div>
         <div class="account-stat"><span>Ожидают ответа</span><b>${pending}</b></div>
-        <div class="account-stat typing"><span>ИИ печатает</span><b>${AccountsView._escape(typingLabel)}</b></div>
       </div>`;
   }
 
@@ -246,6 +242,10 @@ class AccountsView {
         const agentLine = AccountsView._agentLine(agent);
         const stats = AccountsView._statsBlock(agent);
         const folder = AccountsView._folderBlock(a);
+        const typing = (agent.typing_text || '').trim();
+        const live = (agentOn && agent.status === 'generating')
+          ? `<div class="card-meta admin-only"><span class="agent-log">Набирает: ${AccountsView._escape(typing || '…')}</span></div>`
+          : '';
         return `
         <div class="card" data-id="${a.id}">
           <div class="card-top">
@@ -261,10 +261,12 @@ class AccountsView {
             <span style="font-family:var(--font-mono)">${AccountsView._escape(String(a.id).slice(0, 8))}</span>
           </div>
           ${agentLine ? `<div class="card-meta">${agentLine}</div>` : ''}
+          ${live}
           ${folder}
           ${stats}
           <div class="card-actions">
             ${agentBtn}
+            <button class="btn btn-ghost btn-sm admin-only" data-action="history">История диалога</button>
             <button class="btn btn-ghost btn-sm" data-action="check">Проверить</button>
             <button class="btn btn-danger-ghost btn-sm" data-action="delete">Удалить</button>
           </div>

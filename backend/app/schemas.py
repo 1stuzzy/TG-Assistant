@@ -101,3 +101,14 @@ class TelegramPrefsPayload(BaseModel):
     folder_title: Optional[str] = None
     read_delay_ms: Optional[int] = None
     reply_delay_ms: Optional[int] = None
+
+
+class LlmTestRequest(BaseModel):
+    message: str
+    character_id: Optional[str] = None
+    model: Optional[str] = None
+    worker_id: Optional[str] = None
+    history: Optional[list[dict]] = None
+    folder_title: Optional[str] = None
+    read_delay_ms: Optional[int] = None
+    reply_delay_ms: Optional[int] = None

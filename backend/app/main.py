@@ -13,6 +13,7 @@ from app.api.routes import router
 from app.config import settings
 from app.deps import agents
 from app.services.log_hub import attach_log_hub, log_hub
+from app.services.model_trace import model_trace
 
 attach_log_hub()
 if not logging.getLogger().handlers:
@@ -27,6 +28,7 @@ FRONTEND_DIR = Path(__file__).resolve().parent.parent.parent / "frontend"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     log_hub.set_loop(asyncio.get_running_loop())
+    model_trace.set_loop(asyncio.get_running_loop())
     settings.models_dir.mkdir(parents=True, exist_ok=True)
     logging.getLogger("app").info("Backend запущен, модели: %s", settings.models_dir)
     yield

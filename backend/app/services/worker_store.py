@@ -205,7 +205,7 @@ async def ping_url(url: str, api_key: str = "") -> dict:
     if base.endswith("/v1"):
         base = base[:-3]
     last_error: Exception | None = None
-    async with httpx.AsyncClient(timeout=6.0, trust_env=False) as client:
+    async with httpx.AsyncClient(timeout=20.0, trust_env=False) as client:
         for path in ("/health", "/v1/models"):
             try:
                 res = await client.get(base + path, headers=headers)

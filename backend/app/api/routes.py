@@ -3,6 +3,7 @@ HTTP-слой: аккаунты Telegram, каталог GGUF-моделей и 
 """
 import asyncio
 import io
+import time
 import uuid
 import zipfile
 from pathlib import Path
@@ -22,12 +23,16 @@ from app.schemas import (
     ConfirmCodeResponse,
     ConfirmPasswordRequest,
     DefaultModelRequest,
+    LlmTestRequest,
     StartLoginRequest,
     StartLoginResponse,
     WorkerPayload,
 )
 from app.services.host_metrics import collect as collect_host
 from app.services.log_hub import log_hub
+from app.services.model_trace import model_trace
+from app.services.character_store import build_persona, first_name
+from app.services.llm_engine import DEFAULT_PERSONA
 
 router = APIRouter(prefix="/api")
 
@@ -43,6 +48,7 @@ def _hide_model_fields(data: dict) -> dict:
     out["model"] = None
     out["engine"] = None
     out["worker_name"] = None
+    out["typing_text"] = ""
     return out
 
 
@@ -200,6 +206,111 @@ async def agent_status(account_id: str, user: dict = Depends(current_user)):
     if user["role"] != "admin":
         return _hide_model_fields(snap)
     return snap
+
+
+@router.get("/accounts/{account_id}/dialog-history")
+async def dialog_history(account_id: str, user: dict = Depends(admin_user)):
+    require_account(account_id, user)
+    snap = agents.snapshot(account_id)
+    return {
+        "account_id": account_id,
+        "typing": (snap.get("typing_text") or model_trace.live_text(account_id) or "").strip(),
+        "status": snap.get("status"),
+        "chats": model_trace.dialogs_for(account_id),
+    }
+
+
+@router.get("/model-logs")
+async def model_logs(account_id: str | None = Query(default=None), _: dict = Depends(admin_user)):
+    return model_trace.events(account_id or "")
+
+
+@router.websocket("/model-logs/ws")
+async def model_logs_ws(ws: WebSocket):
+    user = rental.user_from_request(ws)
+    if not user or user.get("role") != "admin":
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    for item in model_trace.events():
+        await ws.send_json(item)
+    queue = model_trace.subscribe()
+    try:
+        while True:
+            item = await queue.get()
+            await ws.send_json(item)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        model_trace.unsubscribe(queue)
+
+
+@router.post("/llm/test")
+async def llm_test(payload: LlmTestRequest, _: dict = Depends(admin_user)):
+    text = (payload.message or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+    hist = [
+        {"role": item.get("role"), "content": (item.get("content") or "").strip()}
+        for item in (payload.history or [])
+        if item.get("role") in {"user", "assistant"} and (item.get("content") or "").strip()
+    ]
+    hist.append({"role": "user", "content": text})
+    worker_id = (payload.worker_id or "").strip()
+    t0 = time.perf_counter()
+    try:
+        if worker_id:
+            worker = workers.get(worker_id)
+            if not worker:
+                raise HTTPException(status_code=400, detail="Удалённый сервер не найден")
+            reply = await llm.generate_raw(
+                hist,
+                remote_url=worker["url"],
+                remote_key=worker.get("api_key") or "",
+                account_id="playground",
+            )
+            model_label = worker.get("name") or "удалённый"
+        else:
+            model_name = (payload.model or "").strip()
+            if model_name:
+                try:
+                    path = catalog.resolve(model_name)
+                except Exception as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                await llm.ensure_loaded(path)
+            elif getattr(llm, "_path", None) is None:
+                raise HTTPException(status_code=400, detail="Выберите модель или удалённый сервер")
+            character = characters.get(payload.character_id) if payload.character_id else None
+            persona = build_persona(character) if character else DEFAULT_PERSONA
+            who = first_name(character) if character else None
+            reply = await llm.generate(
+                hist,
+                persona,
+                peer="тест",
+                name=who,
+                city=(character.get("city") if character else None),
+                gender=(character.get("gender") if character else None),
+                account_id="playground",
+                chat_id="test",
+            )
+            model_label = getattr(llm, "loaded_name", None)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    elapsed = time.perf_counter() - t0
+    model_trace.event(
+        "playground",
+        account_id="playground",
+        peer="тест",
+        detail=f"Q: {text[:240]}\nA: {(reply or '')[:400]}",
+        extra={"elapsed": round(elapsed, 2)},
+    )
+    return {
+        "reply": reply,
+        "elapsed": round(elapsed, 2),
+        "model": model_label,
+    }
 
 
 @router.get("/accounts/{account_id}/folders")

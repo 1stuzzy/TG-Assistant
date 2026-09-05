@@ -33,18 +33,17 @@ from app.services.model_catalog import ModelCatalog
 from app.services.worker_store import WorkerStore
 from app.services.rental_store import effective_folder_title
 from app.services.world_context import clock as world_clock
+from app.services.model_trace import model_trace
 
 logger = logging.getLogger(__name__)
 
 SKIP_USER_IDS = {777000, 42777}
-POLL_EVERY_SEC = 5
+POLL_EVERY_SEC = 20
 DIALOG_SCAN_LIMIT = 25
 RECENT_INCOMING_MINUTES = 15
 REPLY_FOLDER_TITLE = "TG-Assistant"
-HISTORY_FETCH = 300
-HISTORY_CHAR_BUDGET = 2400
-BURST_QUIET_SEC = 4.5
-BURST_MAX_SEC = 18.0
+BURST_QUIET_SEC = 2.0
+BURST_MAX_SEC = 8.0
 VOICE_REPLIES = (
     "напиши текстом, я без наушников",
     "голосовые ща не слушаю, кинь письменно)",
@@ -140,6 +139,7 @@ class AgentManager:
         self._remote: dict[str, tuple[str, str]] = {}
         self._folder_ids: dict[str, set[int]] = {}
         self._nudge_at: dict[str, dict[int, float]] = {}
+        self._incoming_ids: dict[str, dict[int, int]] = {}
 
     def is_running(self, account_id: str) -> bool:
         state = self._states.get(account_id)
@@ -285,6 +285,7 @@ class AgentManager:
         self._latest[account_id] = {}
         self._replied.setdefault(account_id, {})
         self._inflight[account_id] = set()
+        self._incoming_ids[account_id] = {}
         self._chat_locks[account_id] = {}
         if worker:
             self._remote[account_id] = (worker["url"], worker.get("api_key") or "")
@@ -339,6 +340,7 @@ class AgentManager:
         self._remote.pop(account_id, None)
         self._folder_ids.pop(account_id, None)
         self._nudge_at.pop(account_id, None)
+        self._incoming_ids.pop(account_id, None)
         return self.snapshot(account_id)
 
     async def stop_all(self) -> None:
@@ -376,6 +378,7 @@ class AgentManager:
                 settings.api_id,
                 settings.api_hash,
                 sequential_updates=True,
+                flood_sleep_threshold=0,
             )
             await client.connect()
             if not await client.is_user_authorized():
@@ -440,6 +443,7 @@ class AgentManager:
             self._remote.pop(account_id, None)
             self._folder_ids.pop(account_id, None)
             self._nudge_at.pop(account_id, None)
+            self._incoming_ids.pop(account_id, None)
             logger.info("Агент account=%s остановлен", account_id)
 
     async def _wait_stop_or_disconnect(self, client: TelegramClient, stop: asyncio.Event) -> None:
@@ -479,14 +483,32 @@ class AgentManager:
                     getattr(sender, "bot", None),
                     getattr(sender, "is_self", None),
                 )
+                model_trace.event(
+                    "skip",
+                    account_id=account_id,
+                    chat_id=str(event.chat_id),
+                    detail="Не отвечает: бот, канал или собственное сообщение",
+                )
                 return
 
             state = self._states.get(account_id)
             if state:
                 state.last_incoming_at = datetime.now(timezone.utc).isoformat()
             logger.info("Входящее ЛС chat=%s: %s", event.chat_id, text[:120].replace("\n", " "))
+            peer_name = " ".join(
+                p for p in (getattr(sender, "first_name", None), getattr(sender, "last_name", None)) if p
+            ).strip() or (getattr(sender, "username", None) or str(event.chat_id))
+            model_trace.event(
+                "incoming",
+                account_id=account_id,
+                chat_id=str(event.chat_id),
+                peer=peer_name,
+                detail=text[:500],
+            )
+            model_trace.add_message(account_id, event.chat_id, peer_name, "user", text)
 
             chat_id = event.chat_id
+            self._note_incoming(account_id, chat_id, getattr(event.message, "id", 0))
             token = object()
             self._latest.setdefault(account_id, {})[chat_id] = (token, event)
             await asyncio.sleep(1.0)
@@ -509,6 +531,12 @@ class AgentManager:
     ) -> None:
         first = True
         while not stop.is_set():
+            if self._generating_counts.get(account_id, 0) > 0:
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=POLL_EVERY_SEC)
+                    return
+                except asyncio.TimeoutError:
+                    continue
             await self._sync_reply_folder(account_id, client)
             await self._scan_dialogs(account_id, client, persona, startup=first)
             if not first:
@@ -531,20 +559,28 @@ class AgentManager:
         state = self._states.get(account_id)
         if not state or not state.running:
             return
+        if self._generating_counts.get(account_id, 0) > 0:
+            return
         started = self._parse_iso(state.started_at) or datetime.now(timezone.utc)
         recent_cut = datetime.now(timezone.utc) - timedelta(minutes=RECENT_INCOMING_MINUTES)
+        inflight = self._inflight.get(account_id) or set()
         try:
             async for dialog in client.iter_dialogs(limit=DIALOG_SCAN_LIMIT):
                 if not state.running:
                     return
                 if not dialog.is_user:
                     continue
+                if dialog.id in inflight:
+                    continue
                 if not self._folder_allows(account_id, dialog.id):
                     continue
                 entity = dialog.entity
                 if not self._should_reply(entity):
                     continue
-                messages = await client.get_messages(entity, limit=8)
+                unread = int(getattr(dialog, "unread_count", 0) or 0)
+                if not startup and unread <= 0:
+                    continue
+                messages = await self._get_messages_safe(client, entity, 8)
                 if not messages:
                     continue
                 incoming = [
@@ -639,7 +675,7 @@ class AgentManager:
         if time.monotonic() - last_at < NUDGE_GUARD_SEC:
             return False
         try:
-            messages = await client.get_messages(dialog.entity, limit=12)
+            messages = await self._get_messages_safe(client, dialog.entity, 12)
         except Exception:
             return False
         texts = [m for m in (messages or []) if m and self._message_text(m)]
@@ -728,8 +764,22 @@ class AgentManager:
                 if reply_ms:
                     await asyncio.sleep(min(reply_ms / 1000.0, 4.0))
                 remote = self._remote.get(account_id)
-                history, _ = await self._history(client, chat_id)
+                history, _ = await self._history(client, chat_id, account_id)
                 peer = await self._peer_label(client, chat_id)
+                model_trace.event(
+                    "nudge",
+                    account_id=account_id,
+                    chat_id=str(chat_id),
+                    peer=peer or "",
+                    detail=f"Тишина в чате — пишет первой. История: {len(history)} реплик",
+                )
+                model_trace.event(
+                    "action",
+                    account_id=account_id,
+                    chat_id=str(chat_id),
+                    peer=peer or "",
+                    detail="Показывает «печатает» в Telegram (тишина)",
+                )
                 memory = self._memory.remember(account_id, chat_id, history, peer)
                 account_persona = state.persona or persona or DEFAULT_PERSONA
                 who = first_name({"name": state.character_name}) if state.character_name else None
@@ -749,11 +799,16 @@ class AgentManager:
                     name=who,
                     gender=state.character_gender,
                     nudge=True,
+                    account_id=account_id,
+                    chat_id=str(chat_id),
                 )
                 reply = (reply or "").strip() or fallback_nudge(state.character_city)
                 state.typing_text = reply
                 await asyncio.sleep(min(0.25 + len(reply) * 0.012, 0.9))
                 await client.send_message(chat_id, reply)
+                model_trace.add_message(account_id, chat_id, peer, "assistant", reply)
+                model_trace.event("nudge", account_id=account_id, chat_id=str(chat_id), peer=peer or "", detail=reply[:500])
+                model_trace.event("send", account_id=account_id, chat_id=str(chat_id), peer=peer or "", detail=reply[:500])
                 state.replies += 1
                 state.last_reply_at = datetime.now(timezone.utc).isoformat()
                 state.last_error = None
@@ -798,9 +853,16 @@ class AgentManager:
         if account and account.tenant_id and self._rental:
             tenant = self._rental.get_tenant(account.tenant_id)
             if not tenant or tenant["status"] != "active":
+                model_trace.event("skip", account_id=account_id, chat_id=str(chat_id), detail="Панель приостановлена")
                 return
             if not self._folder_allows(account_id, chat_id):
                 logger.info("Чат %s не в папке «%s» — пропуск", chat_id, self._folder_title_for(account_id))
+                model_trace.event(
+                    "skip",
+                    account_id=account_id,
+                    chat_id=str(chat_id),
+                    detail=f"Чат не в папке «{self._folder_title_for(account_id)}»",
+                )
                 return
             if not self._rental.allow_chat(
                 account.tenant_id,
@@ -809,6 +871,7 @@ class AgentManager:
                 int(tenant["max_chats"] or 0),
             ):
                 logger.info("Чат %s вне лимита панели", chat_id)
+                model_trace.event("skip", account_id=account_id, chat_id=str(chat_id), detail="Чат вне лимита панели")
                 return
         if not self._message_text(message):
             return
@@ -817,7 +880,7 @@ class AgentManager:
         async with lock:
             already = self._replied.setdefault(account_id, {})
             inflight = self._inflight.setdefault(account_id, set())
-            latest_id = await self._wait_for_burst(client, chat_id, message.id)
+            latest_id = await self._wait_for_burst(account_id, chat_id, message.id)
             if already.get(chat_id, 0) >= latest_id:
                 return
             inflight.add(chat_id)
@@ -841,11 +904,33 @@ class AgentManager:
     ) -> None:
         msg_id = max(int(latest_id or 0), int(getattr(message, "id", 0) or 0))
         read_ms, reply_ms = self._delays_for(account_id)
+        peer = await self._peer_label(client, chat_id)
         if read_ms:
+            model_trace.event(
+                "delay",
+                account_id=account_id,
+                chat_id=str(chat_id),
+                peer=peer or "",
+                detail=f"Ждёт {read_ms} мс перед прочтением",
+            )
             await asyncio.sleep(read_ms / 1000.0)
-        msg_id = max(msg_id, await self._latest_incoming_id(client, chat_id))
+        msg_id = max(msg_id, self._peek_incoming(account_id, chat_id))
         msg_id = await self._mark_read(client, chat_id, msg_id) or msg_id
+        model_trace.event(
+            "read",
+            account_id=account_id,
+            chat_id=str(chat_id),
+            peer=peer or "",
+            detail=f"Отметила прочитанным до id={msg_id}",
+        )
         if reply_ms:
+            model_trace.event(
+                "delay",
+                account_id=account_id,
+                chat_id=str(chat_id),
+                peer=peer or "",
+                detail=f"Пауза {reply_ms} мс, затем начнёт печатать",
+            )
             await asyncio.sleep(reply_ms / 1000.0)
         await self._maybe_react(client, chat_id, msg_id)
         typing_stop = asyncio.Event()
@@ -858,19 +943,34 @@ class AgentManager:
         state.status = "generating"
         state.typing_text = ""
         typing_task = asyncio.create_task(self._keep_typing(client, chat_id, typing_stop))
+        model_trace.event(
+            "action",
+            account_id=account_id,
+            chat_id=str(chat_id),
+            peer=peer or "",
+            detail="Показывает «печатает» в Telegram",
+        )
         ack_task = asyncio.create_task(
-            self._ack_while_generating(client, chat_id, acked, saw_newer, typing_stop)
+            self._ack_while_generating(account_id, client, chat_id, acked, saw_newer, typing_stop)
         )
         try:
             remote = self._remote.get(account_id)
             reply = ""
             history: list[dict] = []
-            peer = await self._peer_label(client, chat_id)
             for attempt in range(5):
-                history, last_in_id = await self._history(client, chat_id)
-                if last_in_id > msg_id:
-                    msg_id = await self._mark_read(client, chat_id, last_in_id) or last_in_id
-                    acked[0] = max(acked[0], msg_id)
+                if attempt == 0 or saw_newer.is_set():
+                    history, last_in_id = await self._history(client, chat_id, account_id)
+                    model_trace.event(
+                        "history",
+                        account_id=account_id,
+                        chat_id=str(chat_id),
+                        peer=peer or "",
+                        detail=f"Взяла {len(history)} реплик из Telegram" + (f", попытка {attempt + 1}" if attempt else ""),
+                    )
+                    if last_in_id > msg_id:
+                        msg_id = await self._mark_read(client, chat_id, last_in_id) or last_in_id
+                        acked[0] = max(acked[0], msg_id)
+                    saw_newer.clear()
                 memory = self._memory.remember(account_id, chat_id, history, peer)
                 logger.info(
                     "Генерация chat=%s peer=%s реплик=%s память=%s попытка=%s",
@@ -887,6 +987,13 @@ class AgentManager:
                 voice_reply = self._voice_only_reply(history)
                 if voice_reply:
                     reply = voice_reply
+                    model_trace.event(
+                        "reply",
+                        account_id=account_id,
+                        chat_id=str(chat_id),
+                        peer=peer or "",
+                        detail="Ответ без модели: в чате было голосовое\n" + voice_reply[:400],
+                    )
                 else:
                     account_persona = (state.persona or persona or DEFAULT_PERSONA)
                     who = first_name({"name": state.character_name}) if state.character_name else None
@@ -901,14 +1008,23 @@ class AgentManager:
                         city=state.character_city,
                         name=who,
                         gender=state.character_gender,
+                        account_id=account_id,
+                        chat_id=str(chat_id),
                     )
-                newer_id = max(acked[0], await self._latest_incoming_id(client, chat_id))
+                newer_id = max(acked[0], self._peek_incoming(account_id, chat_id))
                 if newer_id <= msg_id and not saw_newer.is_set():
                     break
                 msg_id = await self._mark_read(client, chat_id, newer_id) or newer_id
                 acked[0] = max(acked[0], msg_id)
                 saw_newer.clear()
                 logger.info("Пока писали, пришли новые сообщения chat=%s — пересобираю ответ", chat_id)
+                model_trace.event(
+                    "rewrite",
+                    account_id=account_id,
+                    chat_id=str(chat_id),
+                    peer=peer or "",
+                    detail="Пока печатала, пришли новые сообщения — пересобирает ответ",
+                )
             state.typing_text = reply
             if not (reply or "").strip():
                 last_text = next(
@@ -916,9 +1032,18 @@ class AgentManager:
                     "",
                 )
                 who = first_name({"name": state.character_name}) if state.character_name else None
-                reply = fallback_reply(last_text, who, state.character_gender, state.character_city, history)
+                reply = fallback_reply(
+                    last_text,
+                    who,
+                    state.character_gender,
+                    state.character_city,
+                    history,
+                    state.persona,
+                )
             await asyncio.sleep(min(0.25 + len(reply) * 0.012, 0.9))
             await client.send_message(chat_id, reply)
+            model_trace.add_message(account_id, chat_id, peer, "assistant", reply)
+            model_trace.event("send", account_id=account_id, chat_id=str(chat_id), peer=peer or "", detail=reply[:500])
             self._replied.setdefault(account_id, {})[chat_id] = msg_id
             state.replies += 1
             state.last_reply_at = datetime.now(timezone.utc).isoformat()
@@ -926,10 +1051,23 @@ class AgentManager:
             logger.info("Ответ отправлен chat=%s: %s", chat_id, reply[:120].replace("\n", " "))
         except FloodWaitError as exc:
             logger.warning("FloodWait %s сек", exc.seconds)
+            model_trace.event(
+                "error",
+                account_id=account_id,
+                chat_id=str(chat_id),
+                peer=peer or "",
+                detail=f"FloodWait {exc.seconds} сек при отправке",
+            )
             await asyncio.sleep(exc.seconds + 1)
         except Exception as exc:
             logger.exception("Не удалось ответить в чате %s: %s", chat_id, exc)
             state.last_error = str(exc)
+            model_trace.event(
+                "error",
+                account_id=account_id,
+                chat_id=str(chat_id),
+                detail=str(exc)[:500],
+            )
         finally:
             state.typing_text = ""
             typing_stop.set()
@@ -965,6 +1103,7 @@ class AgentManager:
 
     async def _ack_while_generating(
         self,
+        account_id: str,
         client: TelegramClient,
         chat_id: int,
         acked: list[int],
@@ -973,32 +1112,48 @@ class AgentManager:
     ) -> None:
         while not stop.is_set():
             try:
-                await asyncio.wait_for(stop.wait(), timeout=0.7)
+                await asyncio.wait_for(stop.wait(), timeout=2.0)
                 return
             except asyncio.TimeoutError:
                 pass
             except asyncio.CancelledError:
                 return
-            try:
-                newest = await self._latest_incoming_id(client, chat_id)
-            except asyncio.CancelledError:
-                return
-            except Exception:
-                continue
+            newest = self._peek_incoming(account_id, chat_id)
             if newest > acked[0]:
                 acked[0] = await self._mark_read(client, chat_id, newest) or newest
                 dirty.set()
 
-    async def _mark_read(self, client: TelegramClient, chat_id: int, max_id: int) -> int:
+    def _note_incoming(self, account_id: str, chat_id: int, msg_id: int) -> None:
         try:
-            newest = max(int(max_id or 0), await self._latest_incoming_id(client, chat_id))
+            msg_id = int(msg_id or 0)
+        except (TypeError, ValueError):
+            return
+        if not msg_id:
+            return
+        bucket = self._incoming_ids.setdefault(account_id, {})
+        bucket[int(chat_id)] = max(int(bucket.get(int(chat_id), 0) or 0), msg_id)
+
+    def _peek_incoming(self, account_id: str, chat_id: int) -> int:
+        return int((self._incoming_ids.get(account_id) or {}).get(int(chat_id), 0) or 0)
+
+    async def _get_messages_safe(self, client: TelegramClient, entity, limit: int) -> list:
+        try:
+            return list(await client.get_messages(entity, limit=limit) or [])
+        except FloodWaitError as exc:
+            logger.warning("Telegram flood GetHistory %s сек — пропускаю запрос", exc.seconds)
+            return []
         except Exception:
-            newest = int(max_id or 0)
+            logger.debug("get_messages не удался", exc_info=True)
+            return []
+
+    async def _mark_read(self, client: TelegramClient, chat_id: int, max_id: int) -> int:
+        newest = int(max_id or 0)
         if not newest:
             return 0
         try:
-            # В ЛС Telegram часто не ставит галочку на само max_id — нужен id строго больше.
             await client.send_read_acknowledge(chat_id, max_id=newest + 1)
+        except FloodWaitError as exc:
+            logger.warning("FloodWait %s сек на read-ack chat=%s", exc.seconds, chat_id)
         except Exception:
             logger.debug("Не удалось отметить прочитанным chat=%s max_id=%s", chat_id, newest, exc_info=True)
             try:
@@ -1007,45 +1162,25 @@ class AgentManager:
                 logger.debug("Повторный read-ack не прошёл chat=%s", chat_id, exc_info=True)
         return newest
 
-    async def _wait_for_burst(self, client: TelegramClient, chat_id: int, known_id: int) -> int:
-        """Ждём паузу в наборе, чтобы собрать несколько сообщений в одно обращение."""
-        latest = known_id
+    async def _wait_for_burst(self, account_id: str, chat_id: int, known_id: int) -> int:
+        """Ждём паузу в наборе по входящим событиям, без GetHistory."""
+        latest = int(known_id or 0)
+        self._note_incoming(account_id, chat_id, latest)
         deadline = time.monotonic() + BURST_MAX_SEC
         while time.monotonic() < deadline:
             await asyncio.sleep(BURST_QUIET_SEC)
-            try:
-                messages = await client.get_messages(chat_id, limit=16)
-            except Exception:
-                break
-            incoming = [
-                m.id
-                for m in messages
-                if not getattr(m, "out", False) and self._message_text(m)
-            ]
-            if not incoming:
-                break
-            newest = max(incoming)
+            newest = self._peek_incoming(account_id, chat_id)
             if newest <= latest:
                 break
             latest = newest
         return latest
 
-    async def _latest_incoming_id(self, client: TelegramClient, chat_id: int) -> int:
-        try:
-            messages = await client.get_messages(chat_id, limit=12)
-        except Exception:
-            return 0
-        last_in_id = 0
-        for msg in messages or []:
-            if getattr(msg, "out", False) or not self._message_text(msg):
-                continue
-            last_in_id = max(last_in_id, int(getattr(msg, "id", 0) or 0))
-        return last_in_id
-
-    async def _history(self, client: TelegramClient, chat_id: int) -> tuple[list[dict], int]:
-        messages = await client.get_messages(chat_id, limit=HISTORY_FETCH)
+    async def _history(
+        self, client: TelegramClient, chat_id: int, account_id: str = ""
+    ) -> tuple[list[dict], int]:
+        messages = await self._get_messages_safe(client, chat_id, settings.chat_history_fetch)
         history: list[dict] = []
-        last_in_id = 0
+        last_in_id = self._peek_incoming(account_id, chat_id) if account_id else 0
         for msg in reversed(list(messages)):
             text = self._message_text(msg)
             if not text:
@@ -1053,6 +1188,8 @@ class AgentManager:
             role = "assistant" if msg.out else "user"
             if not msg.out:
                 last_in_id = max(last_in_id, int(msg.id))
+                if account_id:
+                    self._note_incoming(account_id, chat_id, msg.id)
             if history and history[-1]["role"] == role:
                 history[-1]["content"] = (history[-1]["content"] + "\n" + text).strip()
             else:
@@ -1169,7 +1306,7 @@ class AgentManager:
 
     async def _maybe_react(self, client: TelegramClient, chat_id: int, msg_id: int) -> None:
         try:
-            messages = await client.get_messages(chat_id, limit=8)
+            messages = await self._get_messages_safe(client, chat_id, 8)
         except Exception:
             return
         incoming = [

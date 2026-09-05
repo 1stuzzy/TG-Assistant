@@ -59,10 +59,14 @@ class Settings:
         ).resolve()
         self.admin_login: str = os.getenv("ADMIN_LOGIN", "admin")
         self.admin_password: str = os.getenv("ADMIN_PASSWORD", "admin")
-        self.llm_n_ctx: int = int(os.getenv("LLM_N_CTX", "2048"))
+        self.llm_n_ctx: int = int(os.getenv("LLM_N_CTX", "4096"))
+        # compact: карточка + этот чат, без пачки few-shot в контексте.
+        # full: старый длинный промт с примерами из dialogues.jsonl.
+        self.llm_prompt_mode: str = (os.getenv("LLM_PROMPT_MODE", "compact") or "compact").strip().lower()
+        self.llm_few_shots: int = max(0, int(os.getenv("LLM_FEW_SHOTS", "6")))
         self.llm_n_threads: int = int(os.getenv("LLM_N_THREADS", "0"))
         self.llm_n_gpu_layers: int = int(os.getenv("LLM_N_GPU_LAYERS", "0"))
-        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "96"))
+        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "160"))
         self.llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.82"))
         self.llm_top_p: float = float(os.getenv("LLM_TOP_P", "1.0"))
         self.llm_min_p: float = float(os.getenv("LLM_MIN_P", "0.05"))
@@ -80,6 +84,8 @@ class Settings:
         }
         self.llm_nudge_after_min: int = max(3, int(os.getenv("LLM_NUDGE_AFTER_MIN", "12")))
         self.llm_nudge_second_min: int = max(20, int(os.getenv("LLM_NUDGE_SECOND_MIN", "90")))
+        # Сколько последних TG-сообщений тянуть в историю ответа
+        self.chat_history_fetch: int = max(24, int(os.getenv("CHAT_HISTORY_FETCH", "48")))
         self.world_timezone: str = os.getenv("WORLD_TIMEZONE", "Europe/Moscow")
         self.world_news: bool = os.getenv("WORLD_NEWS", "1").strip().lower() not in {
             "0",

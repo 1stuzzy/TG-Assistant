@@ -6,7 +6,7 @@
   <title>TG Manager — управление аккаунтами Telegram</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=1.4.10">
+  <link rel="stylesheet" href="css/styles.css?v=1.4.11">
 
 </head>
 <body>
@@ -39,6 +39,14 @@
     <div class="nav-item admin-only" data-tab="tenants">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
       Подписки
+    </div>
+    <div class="nav-item admin-only" data-tab="playground">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+      Тест модели
+    </div>
+    <div class="nav-item admin-only" id="modelLogsBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+      Логи модели
     </div>
     <div class="nav-item admin-only" id="consoleBtn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -397,6 +405,39 @@
       </div>
     </div>
   </div>
+
+  <div id="tabPlayground" class="settings-content admin-only">
+    <div class="topbar">
+      <div class="title-block">
+        <h1>Тест модели</h1>
+      </div>
+    </div>
+    <div class="play-layout">
+      <div class="play-side">
+        <div class="field">
+          <label>Где считать</label>
+          <select class="text-input" id="playSource"></select>
+        </div>
+        <div class="field" id="playModelField">
+          <label>Модель</label>
+          <select class="text-input" id="playModel"></select>
+        </div>
+        <div class="field" id="playCharField">
+          <label>Персонаж</label>
+          <select class="text-input" id="playCharacter"></select>
+        </div>
+        <p class="desc" id="playStatus"></p>
+        <button class="btn btn-ghost btn-sm" type="button" id="playClear">Очистить чат</button>
+      </div>
+      <div class="play-main">
+        <div class="history-thread play-thread" id="playThread"></div>
+        <div class="play-compose">
+          <textarea class="text-input" id="playInput" rows="2" placeholder="Напишите как собеседник…"></textarea>
+          <button class="btn btn-primary" type="button" id="playSend">Отправить</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </main>
 
 <!-- ================= ADD ACCOUNT MODAL ================= -->
@@ -535,6 +576,38 @@
   </div>
 </div>
 
+<div class="overlay" id="historyOverlay">
+  <div class="modal history-modal">
+    <div class="modal-head">
+      <h2 id="historyTitle">История диалога</h2>
+      <button class="close-x" id="historyCloseBtn" type="button">✕</button>
+    </div>
+    <p class="modal-sub">Все сохранённые ответы этого аккаунта. Снизу — что модель набирает прямо сейчас.</p>
+    <div class="history-layout">
+      <div class="history-chats" id="historyChats"></div>
+      <div class="history-main">
+        <div class="history-thread" id="historyThread"></div>
+        <div class="history-typing" id="historyTyping" hidden></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modelLogsOverlay">
+  <div class="modal console-modal">
+    <div class="modal-head">
+      <h2>Логи модели</h2>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input class="text-input" id="modelLogsFilter" placeholder="Фильтр: промт, чат, ошибка" style="width:220px;padding:6px 10px;font-size:12px">
+        <button class="btn btn-ghost btn-sm" id="modelLogsClearBtn" type="button">Очистить</button>
+        <button class="close-x" id="modelLogsCloseBtn" type="button">✕</button>
+      </div>
+    </div>
+    <p class="modal-sub">Входящее, сбор промта, набор текста, отправка в Telegram, ошибки и тесты из панели.</p>
+    <div class="console-log" id="modelLogsBody"></div>
+  </div>
+</div>
+
 <div class="overlay" id="consoleOverlay">
   <div class="modal console-modal">
     <div class="modal-head">
@@ -569,14 +642,17 @@
 
 <div class="toast-wrap" id="toastWrap"></div>
 
-<script src="js/api.js?v=1.4.10"></script>
-<script src="js/harvest.js?v=1.4.10"></script>
-<script src="js/accounts.js?v=1.4.10"></script>
-<script src="js/wizard.js?v=1.4.10"></script>
-<script src="js/settings.js?v=1.4.10"></script>
-<script src="js/tenants.js?v=1.4.10"></script>
-<script src="js/console.js?v=1.4.10"></script>
-<script src="js/app.js?v=1.4.10"></script>
+<script src="js/api.js?v=1.4.12"></script>
+<script src="js/harvest.js?v=1.4.12"></script>
+<script src="js/accounts.js?v=1.4.12"></script>
+<script src="js/wizard.js?v=1.4.12"></script>
+<script src="js/settings.js?v=1.4.12"></script>
+<script src="js/tenants.js?v=1.4.12"></script>
+<script src="js/console.js?v=1.4.12"></script>
+<script src="js/dialog-history.js?v=1.4.12"></script>
+<script src="js/playground.js?v=1.4.12"></script>
+<script src="js/model-logs.js?v=1.4.12"></script>
+<script src="js/app.js?v=1.4.12"></script>
 
 </body>
 </html>

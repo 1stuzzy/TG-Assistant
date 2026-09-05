@@ -146,6 +146,7 @@ class App {
         }
         this.agentDialog.open(id);
       },
+      onHistory: (id, label) => this.dialogHistory.open(id, label),
     });
 
     this.wizard = new LoginWizard({
@@ -160,6 +161,15 @@ class App {
       onStarted: () => this.accountsView.refresh(),
     });
     this.devConsole = new DevConsole(apiBaseUrl);
+    this.dialogHistory = new DialogHistory({
+      api: this.api,
+      toast: (type, msg) => this.toast(type, msg),
+    });
+    this.playground = new ModelPlayground({
+      api: this.api,
+      toast: (type, msg) => this.toast(type, msg),
+    });
+    this.modelLogs = new ModelLogs(apiBaseUrl);
 
     this.settings = new SettingsManager({
       container: document.getElementById('tabSettings'),
@@ -222,6 +232,11 @@ class App {
       const el = document.getElementById('tabTenants');
       if (el) el.classList.add('active');
       if (this.tenants) this.tenants.refresh();
+    }
+    if (tab === 'playground') {
+      const el = document.getElementById('tabPlayground');
+      if (el) el.classList.add('active');
+      if (this.playground) this.playground.refresh();
     }
   }
 
